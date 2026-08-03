@@ -1,0 +1,37 @@
+[
+  {
+    "id": "AUD-8821",
+    "date": "2023-10-27",
+    "targetUrl": "subdomain.app.internal.net",
+    "score": 94,
+    "status": "COMPLETE"
+  },
+  {
+    "id": "AUD-8820",
+    "date": "2023-10-26",
+    "targetUrl": "checkout.commerce.flow",
+    "score": 42,
+    "status": "FAILED"
+  },
+  {
+    "id": "AUD-8819",
+    "date": "2023-10-25",
+    "targetUrl": "api.gateway.v2.prod",
+    "score": 88,
+    "status": "COMPLETE"
+  },
+  {
+    "id": "AUD-8818",
+    "date": "2023-10-24",
+    "targetUrl": "dashboard.metrics.view",
+    "score": 91,
+    "status": "COMPLETE"
+  },
+  {
+    "id": "AUD-8817",
+    "date": "2023-10-22",
+    "targetUrl": "legacy.auth.portal",
+    "score": 24,
+    "status": "FAILED"
+  }
+]
