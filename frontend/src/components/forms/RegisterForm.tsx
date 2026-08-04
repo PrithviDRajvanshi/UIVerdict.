@@ -3,6 +3,7 @@ import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Link, useNavigate } from 'react-router-dom';
+import { useAuth } from '../../contexts/AuthContext';
 
 const registerSchema = z.object({
   name: z.string().min(2, 'Name is required'),
@@ -14,6 +15,7 @@ type RegisterFormData = z.infer<typeof registerSchema>;
 
 export const RegisterForm: React.FC = () => {
   const navigate = useNavigate();
+  const { login } = useAuth();
   const {
     register,
     handleSubmit,
@@ -23,7 +25,8 @@ export const RegisterForm: React.FC = () => {
   });
 
   const onSubmit = (data: RegisterFormData) => {
-    navigate('/dashboard');
+    login();
+    navigate('/report/749-X2');
   };
 
   return (
@@ -78,7 +81,7 @@ export const RegisterForm: React.FC = () => {
       <div className="mt-6 text-center font-mono-data text-mono-data text-[#888888]">
         Already registered?{' '}
         <Link to="/login" className="text-primary underline">
-          Sign In
+          Log In
         </Link>
       </div>
     </div>

@@ -2,7 +2,8 @@ import React from 'react';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../../contexts/AuthContext';
 
 const loginSchema = z.object({
   email: z.string().email('Invalid email address'),
@@ -13,6 +14,7 @@ type LoginFormData = z.infer<typeof loginSchema>;
 
 export const LoginForm: React.FC = () => {
   const navigate = useNavigate();
+  const { login } = useAuth();
   const {
     register,
     handleSubmit,
@@ -22,8 +24,8 @@ export const LoginForm: React.FC = () => {
   });
 
   const onSubmit = (data: LoginFormData) => {
-    // Frontend mock login authentication trigger
-    navigate('/dashboard');
+    login();
+    navigate('/report/749-X2');
   };
 
   return (
@@ -63,13 +65,6 @@ export const LoginForm: React.FC = () => {
           AUTHENTICATE
         </button>
       </form>
-
-      <div className="mt-6 text-center font-mono-data text-mono-data text-[#888888]">
-        Need access?{' '}
-        <Link to="/register" className="text-primary underline">
-          Request System Access
-        </Link>
-      </div>
     </div>
   );
 };

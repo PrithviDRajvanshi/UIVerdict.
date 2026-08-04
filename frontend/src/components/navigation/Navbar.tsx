@@ -1,8 +1,10 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { useAuth } from '../../contexts/AuthContext';
 
 export const Navbar: React.FC = () => {
   const location = useLocation();
+  const { isAuthenticated, logout } = useAuth();
 
   const isActive = (path: string) => location.pathname === path;
 
@@ -14,48 +16,54 @@ export const Navbar: React.FC = () => {
         </Link>
         <div className="hidden md:flex items-center space-x-8">
           <Link
-            to="/analysis"
-            className={`font-label-sm text-label-sm transition-colors duration-200 ${isActive('/analysis')
+            to="/"
+            className={`font-label-sm text-label-sm transition-colors duration-200 ${
+              isActive('/') || isActive('/analysis')
                 ? 'text-primary font-bold border-b border-primary pb-1'
                 : 'text-on-surface-variant font-normal hover:text-primary'
-              }`}
+            }`}
           >
-            ANALYSIS
-          </Link>
-          <Link
-            to="/dashboard"
-            className={`font-label-sm text-label-sm transition-colors duration-200 ${isActive('/dashboard')
-                ? 'text-primary font-bold border-b border-primary pb-1'
-                : 'text-on-surface-variant font-normal hover:text-primary'
-              }`}
-          >
-            DASHBOARD
-          </Link>
-          <Link
-            to="/archive"
-            className={`font-label-sm text-label-sm transition-colors duration-200 ${isActive('/archive') || isActive('/history')
-                ? 'text-primary font-bold border-b border-primary pb-1'
-                : 'text-on-surface-variant font-normal hover:text-primary'
-              }`}
-          >
-            ARCHIVE
+            ANALYZE
           </Link>
           <Link
             to="/report/749-X2"
-            className={`font-label-sm text-label-sm transition-colors duration-200 ${isActive('/report/749-X2')
+            className={`font-label-sm text-label-sm transition-colors duration-200 ${
+              isActive('/report/749-X2') || location.pathname.startsWith('/report') || isActive('/saved-reports')
                 ? 'text-primary font-bold border-b border-primary pb-1'
                 : 'text-on-surface-variant font-normal hover:text-primary'
-              }`}
+            }`}
           >
-            REPORT
+            REPORTS
+          </Link>
+          <Link
+            to="/archive"
+            className={`font-label-sm text-label-sm transition-colors duration-200 ${
+              isActive('/archive') || isActive('/history')
+                ? 'text-primary font-bold border-b border-primary pb-1'
+                : 'text-on-surface-variant font-normal hover:text-primary'
+            }`}
+          >
+            ARCHIVE
           </Link>
         </div>
-        <Link
-          to="/login"
-          className="tech-button font-label-sm text-label-sm px-4 py-2 hover:bg-primary hover:text-brand-dark transition-colors duration-200 uppercase tracking-widest bg-brand-dark text-primary no-underline"
-        >
-          GET STARTED
-        </Link>
+
+        <div className="flex items-center gap-3">
+          {isAuthenticated ? (
+            <button
+              onClick={logout}
+              className="tech-button font-label-sm text-label-sm px-4 py-2 hover:bg-primary hover:text-brand-dark transition-colors duration-200 uppercase tracking-widest bg-brand-dark text-primary cursor-pointer"
+            >
+              LOG OUT
+            </button>
+          ) : (
+            <Link
+              to="/register"
+              className="tech-button font-label-sm text-label-sm px-4 py-2 hover:bg-primary hover:text-brand-dark transition-colors duration-200 uppercase tracking-widest bg-primary text-brand-dark no-underline"
+            >
+              SIGN UP
+            </Link>
+          )}
+        </div>
       </div>
     </nav>
   );

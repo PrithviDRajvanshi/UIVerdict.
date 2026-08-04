@@ -8,7 +8,7 @@ export const UrlSearchForm: React.FC = () => {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (url) {
-      navigate('/report/749-X2');
+      navigate('/analysis');
     }
   };
 

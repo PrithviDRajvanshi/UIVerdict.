@@ -1,16 +1,19 @@
 import React from 'react';
+import { Link } from 'react-router-dom';
 import { ReportMetrics } from '../../types/report';
 
 interface ScorePanelProps {
   overallScore: number;
   verdictStatus: string;
   metrics: ReportMetrics;
+  isAuthenticated?: boolean;
 }
 
 export const ScorePanel: React.FC<ScorePanelProps> = ({
   overallScore,
   verdictStatus,
   metrics,
+  isAuthenticated = true,
 }) => {
   return (
     <div className="md:col-span-4 bg-[#151515] border border-[#2a2a2a] flex flex-col h-full">
@@ -30,47 +33,65 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
           </div>
         </div>
         <hr className="border-[#2a2a2a] border-t-1" />
-        <div className="flex flex-col gap-4">
-          <div>
-            <div className="flex justify-between font-mono-data text-mono-data mb-1 text-primary">
-              <span>PERFORMANCE</span>
-              <span>{metrics.performance}</span>
+        {isAuthenticated ? (
+          <div className="flex flex-col gap-4">
+            <div>
+              <div className="flex justify-between font-mono-data text-mono-data mb-1 text-primary">
+                <span>PERFORMANCE</span>
+                <span>{metrics.performance}</span>
+              </div>
+              <div className="h-2 progress-bar-bg w-full">
+                <div className="h-full progress-bar-fill" style={{ width: `${metrics.performance}%` }} />
+              </div>
             </div>
-            <div className="h-2 progress-bar-bg w-full">
-              <div className="h-full progress-bar-fill" style={{ width: `${metrics.performance}%` }} />
-            </div>
-          </div>
 
-          <div>
-            <div className="flex justify-between font-mono-data text-mono-data mb-1 text-primary">
-              <span>ACCESSIBILITY</span>
-              <span>{metrics.accessibility}</span>
+            <div>
+              <div className="flex justify-between font-mono-data text-mono-data mb-1 text-primary">
+                <span>ACCESSIBILITY</span>
+                <span>{metrics.accessibility}</span>
+              </div>
+              <div className="h-2 progress-bar-bg w-full">
+                <div className="h-full progress-bar-fill" style={{ width: `${metrics.accessibility}%` }} />
+              </div>
             </div>
-            <div className="h-2 progress-bar-bg w-full">
-              <div className="h-full progress-bar-fill" style={{ width: `${metrics.accessibility}%` }} />
-            </div>
-          </div>
 
-          <div>
-            <div className="flex justify-between font-mono-data text-mono-data mb-1 text-primary">
-              <span>BEST PRACTICES</span>
-              <span>{metrics.bestPractices}</span>
+            <div>
+              <div className="flex justify-between font-mono-data text-mono-data mb-1 text-primary">
+                <span>BEST PRACTICES</span>
+                <span>{metrics.bestPractices}</span>
+              </div>
+              <div className="h-2 progress-bar-bg w-full">
+                <div className="h-full progress-bar-fill" style={{ width: `${metrics.bestPractices}%` }} />
+              </div>
             </div>
-            <div className="h-2 progress-bar-bg w-full">
-              <div className="h-full progress-bar-fill" style={{ width: `${metrics.bestPractices}%` }} />
-            </div>
-          </div>
 
-          <div>
-            <div className="flex justify-between font-mono-data text-mono-data mb-1 text-primary">
-              <span>SEO STRUCTURE</span>
-              <span>{metrics.seoStructure}</span>
-            </div>
-            <div className="h-2 progress-bar-bg w-full">
-              <div className="h-full progress-bar-fill" style={{ width: `${metrics.seoStructure}%` }} />
+            <div>
+              <div className="flex justify-between font-mono-data text-mono-data mb-1 text-primary">
+                <span>SEO STRUCTURE</span>
+                <span>{metrics.seoStructure}</span>
+              </div>
+              <div className="h-2 progress-bar-bg w-full">
+                <div className="h-full progress-bar-fill" style={{ width: `${metrics.seoStructure}%` }} />
+              </div>
             </div>
           </div>
-        </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center p-6 text-center border border-[#2a2a2a] bg-[#090909]">
+            <span className="material-symbols-outlined text-2xl text-[#888888] mb-2">lock</span>
+            <span className="font-mono-data text-mono-data text-primary uppercase mb-1">
+              Category metrics locked
+            </span>
+            <p className="font-body-md text-body-md text-[#888888] mb-4 text-xs">
+              Sign up to unlock detailed UI/UX analysis.
+            </p>
+            <Link
+              to="/register"
+              className="tech-button px-4 py-2 font-label-sm text-label-sm uppercase bg-primary text-brand-dark no-underline"
+            >
+              SIGN UP
+            </Link>
+          </div>
+        )}
       </div>
     </div>
   );
