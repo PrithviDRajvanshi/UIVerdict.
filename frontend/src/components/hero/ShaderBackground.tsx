@@ -2,15 +2,15 @@ import React from 'react';
 
 export const ShaderBackground: React.FC = () => {
   return (
-    <div className="absolute inset-0 w-full h-full z-0 opacity-20 pointer-events-none">
+    <div className="absolute inset-0 w-full h-full z-0 opacity-30 pointer-events-none">
       <svg className="w-full h-full" xmlns="http://www.w3.org/2000/svg">
         <defs>
-          <pattern id="smallGrid" width="8" height="8" patternUnits="userSpaceOnUse">
-            <path d="M 8 0 L 0 0 0 8" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5" />
+          <pattern id="smallGrid" width="26" height="26" patternUnits="userSpaceOnUse">
+            <path d="M 26 0 L 0 0 0 26" fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="0.5" />
           </pattern>
-          <pattern id="grid" width="80" height="80" patternUnits="userSpaceOnUse">
-            <rect width="80" height="80" fill="url(#smallGrid)" />
-            <path d="M 80 0 L 0 0 0 80" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="1" />
+          <pattern id="grid" width="104" height="104" patternUnits="userSpaceOnUse">
+            <rect width="104" height="104" fill="url(#smallGrid)" />
+            <path d="M 104 0 L 0 0 0 104" fill="none" stroke="rgba(255,255,255,0.14)" strokeWidth="1" />
           </pattern>
         </defs>
         <rect width="100%" height="100%" fill="url(#grid)" />
