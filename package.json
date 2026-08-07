@@ -2,5 +2,8 @@
   "name": "uiverdict",
   "version": "1.0.0",
   "private": true,
-  "description": "UIVerdict AI UI/UX Quality Evaluation Platform"
+  "description": "UIVerdict AI UI/UX Quality Evaluation Platform",
+  "dependencies": {
+    "playwright": "^1.62.1"
+  }
 }
