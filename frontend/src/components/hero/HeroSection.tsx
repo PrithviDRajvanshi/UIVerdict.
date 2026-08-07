@@ -4,7 +4,7 @@ import { UrlSearchForm } from './UrlSearchForm';
 
 export const HeroSection: React.FC = () => {
   return (
-    <section className="relative w-full min-h-[60vh] flex flex-col items-center justify-center border-b border-brand-border overflow-hidden px-margin-desktop bg-grid-pattern">
+    <section className="relative w-full min-h-[calc(100vh-73px)] flex flex-col items-center justify-center border-b border-brand-border overflow-hidden px-margin-desktop bg-grid-pattern">
       <ShaderBackground />
       <div className="relative z-10 w-full max-w-4xl mx-auto flex flex-col items-center text-center space-y-stack-lg py-12">
         <div className="inline-flex items-center space-x-2 border border-brand-border bg-[#101010] px-3 py-1 rounded-none mb-4">

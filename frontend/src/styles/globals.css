@@ -30,9 +30,9 @@
 /* Technical Blueprint Grid Background */
 .bg-grid-pattern {
   background-image: 
-    linear-gradient(to right, #2a2a2a 1px, transparent 1px),
-    linear-gradient(to bottom, #2a2a2a 1px, transparent 1px);
-  background-size: 32px 32px;
+    linear-gradient(to right, #3d3d3d 1px, transparent 1px),
+    linear-gradient(to bottom, #3d3d3d 1px, transparent 1px);
+  background-size: 26px 26px;
   background-position: center top;
 }
 
