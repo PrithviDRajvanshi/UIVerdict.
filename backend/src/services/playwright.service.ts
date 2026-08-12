@@ -60,21 +60,53 @@ export class PlaywrightService {
 
       try {
         await page.goto(targetUrl, {
-          waitUntil: 'networkidle',
+          waitUntil: 'domcontentloaded',
           timeout: 30000,
         });
       } catch (error: any) {
         const errMessage = error?.message || '';
+
         if (errMessage.includes('Timeout') || errMessage.includes('timeout')) {
-          throw new ApiError(504, `Navigation timeout while loading URL: ${targetUrl}`);
-        }
-        if (errMessage.includes('net::ERR_NAME_NOT_RESOLVED') || errMessage.includes('ENOTFOUND')) {
+          let hasUsableState = false;
+          try {
+            const currentUrl = page.url();
+            if (currentUrl && currentUrl !== 'about:blank') {
+              const bodyLength = await page.evaluate(() => {
+                return document.body ? document.body.innerText.trim().length : 0;
+              });
+              if (bodyLength > 0) {
+                hasUsableState = true;
+              }
+            }
+          } catch {
+            hasUsableState = false;
+          }
+
+          if (!hasUsableState) {
+            throw new ApiError(504, `Navigation timeout while loading URL: ${targetUrl}`);
+          }
+        } else if (
+          errMessage.includes('net::ERR_CONNECTION_REFUSED') ||
+          errMessage.includes('net::ERR_CONNECTION_RESET') ||
+          errMessage.includes('net::ERR_CONNECTION_ABORTED') ||
+          errMessage.includes('ECONNREFUSED') ||
+          errMessage.includes('ECONNRESET')
+        ) {
+          throw new ApiError(502, `Connection failed while connecting to URL: ${targetUrl}`);
+        } else if (errMessage.includes('net::ERR_NAME_NOT_RESOLVED') || errMessage.includes('ENOTFOUND')) {
           throw new ApiError(502, `DNS failure or domain not found for URL: ${targetUrl}`);
-        }
-        if (errMessage.includes('net::ERR_SSL') || errMessage.includes('CERT')) {
+        } else if (errMessage.includes('net::ERR_SSL') || errMessage.includes('CERT')) {
           throw new ApiError(502, `HTTPS/SSL error while connecting to URL: ${targetUrl}`);
+        } else {
+          throw new ApiError(502, `Failed to navigate to URL: ${targetUrl}`);
         }
-        throw new ApiError(502, `Failed to navigate to URL: ${targetUrl}`);
+      }
+
+      // Settling period to allow visual components and fonts to stabilize
+      try {
+        await page.waitForTimeout(2000);
+      } catch {
+        // Ignore errors during settling phase
       }
 
       const filename = this.generateFilename(targetUrl);
@@ -104,3 +136,4 @@ export class PlaywrightService {
 }
 
 export const playwrightService = new PlaywrightService();
+
