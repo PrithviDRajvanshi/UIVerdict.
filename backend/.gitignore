@@ -2,3 +2,9 @@ node_modules/
 dist/
 .env
 temp/screenshots/
+
+/src/generated/prisma
+.claude/
+.windsurf/
+.agents/
+skills-lock.json

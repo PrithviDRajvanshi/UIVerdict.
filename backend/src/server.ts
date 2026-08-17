@@ -1,11 +1,20 @@
 import app from './app';
 import { config } from './config';
+import { connectPostgres } from './config/postgres';
+import { connectMongoDB } from './config/mongodb';
 
 const PORT = config.port;
 
-const server = app.listen(PORT, () => {
-  console.log(`🚀 Server listening on port ${PORT} in ${config.nodeEnv} mode`);
-});
+const startServer = async () => {
+  await connectPostgres();
+  await connectMongoDB();
+
+  return app.listen(PORT, () => {
+    console.log(`🚀 Server listening on port ${PORT} in ${config.nodeEnv} mode`);
+  });
+};
+
+const server = startServer();
 
 process.on('unhandledRejection', (reason: Error) => {
   console.error('Unhandled Rejection:', reason);
@@ -17,3 +26,4 @@ process.on('uncaughtException', (error: Error) => {
 });
 
 export default server;
+

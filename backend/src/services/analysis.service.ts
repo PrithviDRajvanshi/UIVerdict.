@@ -2,6 +2,9 @@ import { playwrightService, ScreenshotResult } from './playwright.service';
 import { lighthouseService, LighthouseMetrics } from './lighthouse.service';
 import { geminiService } from './gemini.service';
 import { AiAnalysis } from '../validators/aiAnalysis.validator';
+import { postgresRepository } from '../repositories/postgres/postgres.repository';
+import { mongoRepository } from '../repositories/mongo/mongo.repository';
+import { AnalysisStatus } from '@prisma/client';
 
 export interface AnalysisData {
   url: string;
@@ -47,6 +50,39 @@ export class AnalysisService {
       globalScore,
     });
 
+    // 5. Orchestrate Dual Database Persistence (PostgreSQL + MongoDB)
+    let analysisId: string | null = null;
+    try {
+      // 5a. Create relational metadata in PostgreSQL inside a Prisma transaction
+      const { analysis } = await postgresRepository.createAnalysisTransaction(url);
+      analysisId = analysis.id;
+
+      // 5b. Persist full analysis snapshot document in MongoDB
+      const mongoSnapshot = await mongoRepository.saveSnapshot({
+        analysisId: analysis.id,
+        url,
+        screenshot: screenshotData,
+        metrics,
+        aiAnalysis,
+      });
+
+      // 5c. Update PostgreSQL Analysis status to COMPLETED with mongoDocumentId reference
+      await postgresRepository.updateAnalysisStatus(
+        analysis.id,
+        AnalysisStatus.COMPLETED,
+        mongoSnapshot._id.toString()
+      );
+    } catch (dbError: any) {
+      console.error('⚠️ Database persistence warning/error:', dbError?.message || dbError);
+      if (analysisId) {
+        try {
+          await postgresRepository.updateAnalysisStatus(analysisId, AnalysisStatus.FAILED);
+        } catch (statusErr) {
+          console.error('Failed to mark analysis status as FAILED:', statusErr);
+        }
+      }
+    }
+
     return {
       status: 'success',
       message: 'Analysis completed successfully',
@@ -64,4 +100,5 @@ export class AnalysisService {
 }
 
 export const analysisService = new AnalysisService();
+
 
