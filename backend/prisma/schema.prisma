@@ -1,0 +1,43 @@
+datasource db {
+  provider = "postgresql"
+}
+
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum AnalysisStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model Project {
+  id        String     @id @default(uuid())
+  name      String     @default("Default Project")
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  analyses  Analysis[]
+
+  @@map("projects")
+}
+
+model Analysis {
+  id              String         @id @default(uuid())
+  projectId       String
+  project         Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  url             String
+  status          AnalysisStatus @default(PENDING)
+  mongoDocumentId String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([projectId])
+  @@index([url])
+  @@index([status])
+  @@index([createdAt])
+  @@map("analyses")
+}
+
