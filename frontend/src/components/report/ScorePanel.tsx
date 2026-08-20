@@ -15,6 +15,14 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
   metrics,
   isAuthenticated = true,
 }) => {
+  const hasWebVitals =
+    metrics.firstContentfulPaint ||
+    metrics.largestContentfulPaint ||
+    metrics.speedIndex ||
+    metrics.totalBlockingTime ||
+    metrics.cumulativeLayoutShift !== undefined ||
+    metrics.timeToInteractive;
+
   return (
     <div className="md:col-span-4 bg-[#151515] border border-[#2a2a2a] flex flex-col h-full">
       <div className="border-b border-[#2a2a2a] p-4">
@@ -74,6 +82,52 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
                 <div className="h-full progress-bar-fill" style={{ width: `${metrics.seoStructure}%` }} />
               </div>
             </div>
+
+            {hasWebVitals && (
+              <div className="mt-2 pt-4 border-t border-[#2a2a2a]">
+                <div className="font-mono-data text-xs text-[#80DEEA] uppercase mb-3 font-bold">
+                  Web Vitals Telemetry
+                </div>
+                <div className="grid grid-cols-2 gap-2 font-mono-data text-[11px]">
+                  {metrics.firstContentfulPaint && (
+                    <div className="bg-[#090909] p-2 border border-[#2a2a2a] flex justify-between">
+                      <span className="text-[#888888]">FCP:</span>
+                      <span className="text-primary font-bold">{metrics.firstContentfulPaint}</span>
+                    </div>
+                  )}
+                  {metrics.largestContentfulPaint && (
+                    <div className="bg-[#090909] p-2 border border-[#2a2a2a] flex justify-between">
+                      <span className="text-[#888888]">LCP:</span>
+                      <span className="text-primary font-bold">{metrics.largestContentfulPaint}</span>
+                    </div>
+                  )}
+                  {metrics.speedIndex && (
+                    <div className="bg-[#090909] p-2 border border-[#2a2a2a] flex justify-between">
+                      <span className="text-[#888888]">Speed Index:</span>
+                      <span className="text-primary font-bold">{metrics.speedIndex}</span>
+                    </div>
+                  )}
+                  {metrics.totalBlockingTime && (
+                    <div className="bg-[#090909] p-2 border border-[#2a2a2a] flex justify-between">
+                      <span className="text-[#888888]">TBT:</span>
+                      <span className="text-primary font-bold">{metrics.totalBlockingTime}</span>
+                    </div>
+                  )}
+                  {metrics.cumulativeLayoutShift !== undefined && (
+                    <div className="bg-[#090909] p-2 border border-[#2a2a2a] flex justify-between">
+                      <span className="text-[#888888]">CLS:</span>
+                      <span className="text-primary font-bold">{metrics.cumulativeLayoutShift}</span>
+                    </div>
+                  )}
+                  {metrics.timeToInteractive && (
+                    <div className="bg-[#090909] p-2 border border-[#2a2a2a] flex justify-between">
+                      <span className="text-[#888888]">TTI:</span>
+                      <span className="text-primary font-bold">{metrics.timeToInteractive}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center p-6 text-center border border-[#2a2a2a] bg-[#090909]">

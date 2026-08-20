@@ -10,7 +10,21 @@ const app: Application = express();
 
 // Security & utility middleware
 app.use(helmet());
-app.use(cors());
+const allowedOrigins = process.env.FRONTEND_URL
+  ? process.env.FRONTEND_URL.split(',')
+  : ['http://localhost:5173', 'http://127.0.0.1:5173'];
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV === 'development') {
+        return callback(null, true);
+      }
+      return callback(new Error('Not allowed by CORS'));
+    },
+    credentials: true,
+  })
+);
 app.use(morgan('dev'));
 app.use(express.json());
 

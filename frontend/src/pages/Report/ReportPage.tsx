@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, useLocation, Link } from 'react-router-dom';
 import { fetchReportById } from '../../services/report.service';
 import { ReportData } from '../../types/report';
 import { ReportHeader } from '../../components/report/ReportHeader';
@@ -11,17 +11,66 @@ import { useAuth } from '../../contexts/AuthContext';
 
 export const ReportPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
+  const location = useLocation();
   const [report, setReport] = useState<ReportData | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
   const { isAuthenticated } = useAuth();
 
   useEffect(() => {
-    fetchReportById(id || '749-X2').then(setReport);
-  }, [id]);
+    let isMounted = true;
+    setLoading(true);
+
+    if (location.state?.report) {
+      setReport(location.state.report);
+      setLoading(false);
+      return;
+    }
+
+    fetchReportById(id || '749-X2')
+      .then((data) => {
+        if (isMounted) {
+          setReport(data);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [id, location.state]);
+
+  if (loading) {
+    return (
+      <div className="max-w-container-max mx-auto px-margin-desktop py-stack-lg flex flex-col items-center justify-center min-h-[50vh]">
+        <div className="font-mono-data text-primary animate-pulse flex items-center gap-3">
+          <span className="animate-spin text-2xl font-bold">⟳</span>
+          <span>LOADING FORENSIC REPORT DATA...</span>
+        </div>
+      </div>
+    );
+  }
 
   if (!report) return null;
 
   return (
     <main className="max-w-container-max mx-auto px-margin-desktop py-stack-lg flex flex-col gap-stack-lg">
+      {report.url && (
+        <div className="bg-[#101010] border border-[#2a2a2a] px-4 py-2 flex items-center justify-between font-mono-data text-xs text-[#888888]">
+          <div className="flex items-center gap-2 truncate">
+            <span className="text-[#80DEEA] font-bold">TARGET:</span>
+            <span className="text-primary font-mono-data truncate">{report.url}</span>
+          </div>
+          <span className="text-[#80DEEA] text-[10px] uppercase border border-[#2a2a2a] px-2 py-0.5 whitespace-nowrap">
+            LIVE ANALYZED
+          </span>
+        </div>
+      )}
+
       <ReportHeader
         evaluationId={report.evaluationId}
         algorithm={report.algorithm}

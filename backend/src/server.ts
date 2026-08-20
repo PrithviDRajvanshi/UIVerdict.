@@ -6,8 +6,7 @@ import { connectMongoDB } from './config/mongodb';
 const PORT = config.port;
 
 const startServer = async () => {
-  await connectPostgres();
-  await connectMongoDB();
+  Promise.allSettled([connectPostgres(), connectMongoDB()]);
 
   return app.listen(PORT, () => {
     console.log(`🚀 Server listening on port ${PORT} in ${config.nodeEnv} mode`);
