@@ -3,13 +3,32 @@ import { useNavigate } from 'react-router-dom';
 
 export const UrlSearchForm: React.FC = () => {
   const [url, setUrl] = useState('');
+  const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (url) {
-      navigate('/analysis');
+    setError(null);
+
+    const trimmed = url.trim();
+    if (!trimmed) {
+      setError('Please enter a valid website URL.');
+      return;
     }
+
+    let validUrl = trimmed;
+    if (!/^https?:\/\//i.test(validUrl)) {
+      validUrl = `https://${validUrl}`;
+    }
+
+    try {
+      new URL(validUrl);
+    } catch {
+      setError('Please enter a valid website URL.');
+      return;
+    }
+
+    navigate('/analysis', { state: { url: validUrl } });
   };
 
   return (
@@ -22,10 +41,12 @@ export const UrlSearchForm: React.FC = () => {
           <input
             className="w-full bg-transparent border-none font-body-md text-body-md text-primary placeholder:text-outline-variant focus:ring-0 px-4 py-4 outline-none"
             placeholder="https://example.com"
-            required
-            type="url"
+            type="text"
             value={url}
-            onChange={(e) => setUrl(e.target.value)}
+            onChange={(e) => {
+              setUrl(e.target.value);
+              if (error) setError(null);
+            }}
           />
         </div>
         <button
@@ -38,6 +59,12 @@ export const UrlSearchForm: React.FC = () => {
           </span>
         </button>
       </form>
+      {error && (
+        <div className="mt-3 p-3 bg-red-950/80 border border-red-800 text-red-300 font-mono-data text-xs flex items-center gap-2">
+          <span className="material-symbols-outlined text-sm text-red-400">error</span>
+          <span>{error}</span>
+        </div>
+      )}
     </div>
   );
 };

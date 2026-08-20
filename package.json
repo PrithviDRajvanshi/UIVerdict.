@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "description": "UIVerdict AI UI/UX Quality Evaluation Platform",
+  "scripts": {
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev"
+  },
   "dependencies": {
     "chrome-launcher": "^1.2.1",
     "lighthouse": "^13.4.1",
