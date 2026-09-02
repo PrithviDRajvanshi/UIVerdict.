@@ -60,8 +60,37 @@ export class GeminiService {
     return this.ai;
   }
 
-  public async generateAnalysis(input: GeminiInputData): Promise<AiAnalysis> {
-    console.log(`[Gemini] Starting AI analysis for URL: ${input.url}`);
+  private isTransientError(error: any): boolean {
+    if (!error) return false;
+    const msg = String(error?.message || error?.status || error).toLowerCase();
+    const statusCode = error?.statusCode || error?.status;
+
+    if (statusCode === 429 || statusCode === 500 || statusCode === 502 || statusCode === 503 || statusCode === 504) {
+      return true;
+    }
+
+    if (
+      msg.includes('429') ||
+      msg.includes('500') ||
+      msg.includes('502') ||
+      msg.includes('503') ||
+      msg.includes('504') ||
+      msg.includes('unavailable') ||
+      msg.includes('resource_exhausted') ||
+      msg.includes('high demand') ||
+      msg.includes('rate limit') ||
+      msg.includes('quota') ||
+      msg.includes('timeout') ||
+      msg.includes('overloaded')
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private async generateSingleAttempt(input: GeminiInputData, attempt: number, maxAttempts: number): Promise<AiAnalysis> {
+    console.log(`[Gemini] Attempt ${attempt}/${maxAttempts}: Starting AI analysis for URL: ${input.url}`);
 
     const client = this.getClient();
     const userPrompt = generateUserPrompt(input);
@@ -79,7 +108,7 @@ export class GeminiService {
 
       const responseText = response.text;
       if (!responseText) {
-        console.error('[Gemini] AI analysis failed: Empty response from Gemini API');
+        console.error(`[Gemini] Attempt ${attempt}/${maxAttempts} failed: Empty response from Gemini API`);
         throw new ApiError(500, 'AI analysis produced an empty response');
       }
 
@@ -87,14 +116,14 @@ export class GeminiService {
       try {
         parsedData = JSON.parse(responseText);
       } catch (parseErr) {
-        console.error('[Gemini] AI analysis failed: Response was not valid JSON');
+        console.error(`[Gemini] Attempt ${attempt}/${maxAttempts} failed: Response was not valid JSON`);
         throw new ApiError(500, 'AI analysis produced malformed JSON');
       }
 
       // Validate schema with Zod
       const validationResult = aiAnalysisSchema.safeParse(parsedData);
       if (!validationResult.success) {
-        console.error('[Gemini] AI analysis failed: Zod validation error', validationResult.error);
+        console.error(`[Gemini] Attempt ${attempt}/${maxAttempts} failed: Zod validation error`, validationResult.error);
         throw new ApiError(500, 'AI analysis response failed validation schema');
       }
 
@@ -103,7 +132,7 @@ export class GeminiService {
       // Enforce backend global score as source of truth for overallVerdict.score
       aiResult.overallVerdict.score = input.globalScore;
 
-      console.log(`[Gemini] AI analysis completed successfully for URL: ${input.url}`);
+      console.log(`[Gemini] Attempt ${attempt}/${maxAttempts}: Completed successfully for URL: ${input.url}`);
       return aiResult;
     } catch (error: any) {
       if (error instanceof ApiError) {
@@ -111,9 +140,8 @@ export class GeminiService {
       }
 
       const errorMessage = error?.message || 'Unknown error';
-      console.error(`[Gemini] AI analysis failed: ${errorMessage}`);
+      console.error(`[Gemini] Attempt ${attempt}/${maxAttempts} failed: ${errorMessage}`);
 
-      // Handle specific error types cleanly without leaking sensitive details or stack traces
       if (
         errorMessage.includes('API key') ||
         errorMessage.includes('API_KEY') ||
@@ -132,13 +160,42 @@ export class GeminiService {
       if (
         errorMessage.includes('timeout') ||
         errorMessage.includes('503') ||
-        errorMessage.includes('UNAVAILABLE')
+        errorMessage.includes('UNAVAILABLE') ||
+        errorMessage.includes('high demand')
       ) {
         throw new ApiError(503, 'Gemini AI service is currently unavailable');
       }
 
       throw new ApiError(500, 'Failed to generate AI analysis');
     }
+  }
+
+  public async generateAnalysis(input: GeminiInputData): Promise<AiAnalysis> {
+    const MAX_ATTEMPTS = 3;
+    let lastError: any = null;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        return await this.generateSingleAttempt(input, attempt, MAX_ATTEMPTS);
+      } catch (error: any) {
+        lastError = error;
+        const isTransient = this.isTransientError(error);
+
+        if (!isTransient || attempt === MAX_ATTEMPTS) {
+          console.error(`[Gemini] Attempt ${attempt}/${MAX_ATTEMPTS} failed permanently or reached max attempts.`);
+          break;
+        }
+
+        const backoffMs = attempt * 2000;
+        console.warn(`[Gemini] Attempt ${attempt}/${MAX_ATTEMPTS} failed with transient error (${error?.message || error}). Retrying in ${backoffMs}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      }
+    }
+
+    if (lastError instanceof ApiError) {
+      throw lastError;
+    }
+    throw new ApiError(503, `Gemini AI service is currently unavailable: ${lastError?.message || 'Unknown failure'}`);
   }
 }
 

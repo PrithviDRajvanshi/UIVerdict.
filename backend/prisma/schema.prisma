@@ -2,7 +2,6 @@ datasource db {
   provider = "postgresql"
 }
 
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -14,13 +13,29 @@ enum AnalysisStatus {
   FAILED
 }
 
+model User {
+  id           String     @id @default(uuid())
+  name         String
+  email        String     @unique
+  passwordHash String
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  projects     Project[]
+  analyses     Analysis[]
+
+  @@map("users")
+}
+
 model Project {
   id        String     @id @default(uuid())
+  userId    String?
+  user      User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
   name      String     @default("Default Project")
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
   analyses  Analysis[]
 
+  @@index([userId])
   @@map("projects")
 }
 
@@ -28,6 +43,8 @@ model Analysis {
   id              String         @id @default(uuid())
   projectId       String
   project         Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId          String?
+  user            User?          @relation(fields: [userId], references: [id], onDelete: Cascade)
   url             String
   status          AnalysisStatus @default(PENDING)
   mongoDocumentId String?
@@ -35,9 +52,11 @@ model Analysis {
   updatedAt       DateTime       @updatedAt
 
   @@index([projectId])
+  @@index([userId])
   @@index([url])
   @@index([status])
   @@index([createdAt])
   @@map("analyses")
 }
+
 

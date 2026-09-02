@@ -7,16 +7,23 @@ export class PostgresRepository {
    */
   public async createAnalysisTransaction(
     url: string,
-    projectName = 'Default Project'
+    projectName = 'Default Project',
+    userId?: string
   ): Promise<{ project: Project; analysis: Analysis }> {
     return await prisma.$transaction(async (tx) => {
       let project = await tx.project.findFirst({
-        where: { name: projectName },
+        where: {
+          name: projectName,
+          ...(userId ? { userId } : {}),
+        },
       });
 
       if (!project) {
         project = await tx.project.create({
-          data: { name: projectName },
+          data: {
+            name: projectName,
+            ...(userId ? { userId } : {}),
+          },
         });
       }
 
@@ -25,6 +32,7 @@ export class PostgresRepository {
           projectId: project.id,
           url,
           status: AnalysisStatus.PROCESSING,
+          ...(userId ? { userId } : {}),
         },
       });
 

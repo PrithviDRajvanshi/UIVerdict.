@@ -26,6 +26,7 @@ export class PlaywrightService {
     const now = new Date();
     const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
     const timePart = now.toTimeString().slice(0, 8).replace(/:/g, '');
+    const uniqueSuffix = Math.random().toString(36).substring(2, 8);
     
     let hostname = 'url';
     try {
@@ -34,7 +35,7 @@ export class PlaywrightService {
       hostname = 'url';
     }
 
-    return `${datePart}-${timePart}-${hostname}.png`;
+    return `${datePart}-${timePart}-${hostname}-${uniqueSuffix}.png`;
   }
 
   public async captureScreenshot(targetUrl: string): Promise<ScreenshotResult> {

@@ -6,11 +6,19 @@ import { connectMongoDB } from './config/mongodb';
 const PORT = config.port;
 
 const startServer = async () => {
-  Promise.allSettled([connectPostgres(), connectMongoDB()]);
+  await Promise.allSettled([connectPostgres(), connectMongoDB()]);
 
-  return app.listen(PORT, () => {
+  const serverInstance = app.listen(PORT, () => {
     console.log(`🚀 Server listening on port ${PORT} in ${config.nodeEnv} mode`);
   });
+
+  // Extend timeouts to 5 minutes (300,000 ms) to support long-running analysis workflows
+  serverInstance.timeout = 300000;
+  serverInstance.requestTimeout = 300000;
+  serverInstance.headersTimeout = 300000;
+  serverInstance.keepAliveTimeout = 60000;
+
+  return serverInstance;
 };
 
 const server = startServer();

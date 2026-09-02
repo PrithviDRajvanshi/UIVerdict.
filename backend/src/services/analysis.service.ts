@@ -32,32 +32,32 @@ export class AnalysisService {
     return Math.round(score * 10) / 10;
   }
 
-  public async analyzeUrl(url: string): Promise<AnalysisResponse> {
-    // 1. Capture Playwright full page screenshot
-    const screenshotData: ScreenshotResult = await playwrightService.captureScreenshot(url);
-
-    // 2. Run Lighthouse performance, accessibility, best-practices, and SEO audit
-    const metrics: LighthouseMetrics = await lighthouseService.runAudit(url);
-
-    // 3. Calculate deterministic global score
-    const globalScore = this.calculateGlobalScore(metrics);
-
-    // 4. Generate Gemini AI qualitative analysis based on real metrics & evidence
-    const aiAnalysis: AiAnalysis = await geminiService.generateAnalysis({
-      url,
-      metrics,
-      screenshot: screenshotData,
-      globalScore,
-    });
-
-    // 5. Orchestrate Dual Database Persistence (PostgreSQL + MongoDB)
+  public async analyzeUrl(url: string, userId?: string): Promise<AnalysisResponse> {
     let analysisId: string | null = null;
+
     try {
-      // 5a. Create relational metadata in PostgreSQL inside a Prisma transaction
-      const { analysis } = await postgresRepository.createAnalysisTransaction(url);
+      // 1. Create relational metadata in PostgreSQL inside a Prisma transaction (status: PROCESSING)
+      const { analysis } = await postgresRepository.createAnalysisTransaction(url, 'Default Project', userId);
       analysisId = analysis.id;
 
-      // 5b. Persist full analysis snapshot document in MongoDB
+      // 2. Capture Playwright full page screenshot
+      const screenshotData: ScreenshotResult = await playwrightService.captureScreenshot(url);
+
+      // 3. Run Lighthouse performance, accessibility, best-practices, and SEO audit
+      const metrics: LighthouseMetrics = await lighthouseService.runAudit(url);
+
+      // 4. Calculate deterministic global score
+      const globalScore = this.calculateGlobalScore(metrics);
+
+      // 5. Generate Gemini AI qualitative analysis based on real metrics & evidence
+      const aiAnalysis: AiAnalysis = await geminiService.generateAnalysis({
+        url,
+        metrics,
+        screenshot: screenshotData,
+        globalScore,
+      });
+
+      // 6. Persist full analysis snapshot document in MongoDB
       const mongoSnapshot = await mongoRepository.saveSnapshot({
         analysisId: analysis.id,
         url,
@@ -66,14 +66,28 @@ export class AnalysisService {
         aiAnalysis,
       });
 
-      // 5c. Update PostgreSQL Analysis status to COMPLETED with mongoDocumentId reference
+      // 7. Update PostgreSQL Analysis status to COMPLETED with mongoDocumentId reference
       await postgresRepository.updateAnalysisStatus(
         analysis.id,
         AnalysisStatus.COMPLETED,
         mongoSnapshot._id.toString()
       );
-    } catch (dbError: any) {
-      console.error('⚠️ Database persistence warning/error:', dbError?.message || dbError);
+
+      return {
+        status: 'success',
+        message: 'Analysis completed successfully',
+        data: {
+          url,
+          screenshot: {
+            filename: screenshotData.filename,
+            path: screenshotData.path,
+          },
+          metrics,
+          aiAnalysis,
+        },
+      };
+    } catch (error: any) {
+      console.error('❌ Analysis pipeline error:', error?.message || error);
       if (analysisId) {
         try {
           await postgresRepository.updateAnalysisStatus(analysisId, AnalysisStatus.FAILED);
@@ -81,21 +95,8 @@ export class AnalysisService {
           console.error('Failed to mark analysis status as FAILED:', statusErr);
         }
       }
+      throw error;
     }
-
-    return {
-      status: 'success',
-      message: 'Analysis completed successfully',
-      data: {
-        url,
-        screenshot: {
-          filename: screenshotData.filename,
-          path: screenshotData.path,
-        },
-        metrics,
-        aiAnalysis,
-      },
-    };
   }
 }
 
