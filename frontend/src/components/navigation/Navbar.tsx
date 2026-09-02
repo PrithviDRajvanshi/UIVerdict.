@@ -4,7 +4,7 @@ import { useAuth } from '../../contexts/AuthContext';
 
 export const Navbar: React.FC = () => {
   const location = useLocation();
-  const { isAuthenticated, logout } = useAuth();
+  const { isAuthenticated, user, logout } = useAuth();
 
   const isActive = (path: string) => location.pathname === path;
 
@@ -49,19 +49,34 @@ export const Navbar: React.FC = () => {
 
         <div className="flex items-center gap-3">
           {isAuthenticated ? (
-            <button
-              onClick={logout}
-              className="tech-button font-label-sm text-label-sm px-4 py-2 hover:bg-primary hover:text-brand-dark transition-colors duration-200 uppercase tracking-widest bg-brand-dark text-primary cursor-pointer"
-            >
-              LOG OUT
-            </button>
+            <>
+              {user?.name && (
+                <span className="hidden sm:inline-block font-mono-data text-xs text-primary uppercase truncate max-w-[160px]">
+                  {user.name}
+                </span>
+              )}
+              <button
+                onClick={logout}
+                className="tech-button font-label-sm text-label-sm px-4 py-2 hover:bg-primary hover:text-brand-dark transition-colors duration-200 uppercase tracking-widest bg-brand-dark text-primary cursor-pointer"
+              >
+                LOG OUT
+              </button>
+            </>
           ) : (
-            <Link
-              to="/register"
-              className="tech-button font-label-sm text-label-sm px-4 py-2 hover:bg-primary hover:text-brand-dark transition-colors duration-200 uppercase tracking-widest bg-primary text-brand-dark no-underline"
-            >
-              SIGN UP
-            </Link>
+            <div className="flex items-center gap-2">
+              <Link
+                to="/login"
+                className="tech-button font-label-sm text-label-sm px-4 py-2 hover:bg-primary hover:text-brand-dark transition-colors duration-200 uppercase tracking-widest bg-brand-dark text-primary no-underline"
+              >
+                LOG IN
+              </Link>
+              <Link
+                to="/register"
+                className="tech-button font-label-sm text-label-sm px-4 py-2 hover:bg-primary hover:text-brand-dark transition-colors duration-200 uppercase tracking-widest bg-primary text-brand-dark no-underline"
+              >
+                SIGN UP
+              </Link>
+            </div>
           )}
         </div>
       </div>

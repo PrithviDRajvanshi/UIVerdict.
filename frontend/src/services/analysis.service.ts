@@ -33,6 +33,7 @@ export interface BackendAiAnalysis {
 }
 
 export interface BackendAnalysisData {
+  id?: string;
   url: string;
   screenshot: BackendScreenshot;
   metrics: BackendMetrics;
@@ -73,6 +74,7 @@ export async function analyzeWebsite(url: string, signal?: AbortSignal): Promise
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ url: formattedUrl }),
+      credentials: 'include',
       signal,
     });
   } catch (netErr: any) {
@@ -113,7 +115,7 @@ export async function analyzeWebsite(url: string, signal?: AbortSignal): Promise
 }
 
 export function mapBackendToReportData(data: BackendAnalysisData, id?: string): ReportData {
-  const reportId = id || `UV-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+  const reportId = data.id || id || `UV-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
   const timestamp = new Date().toISOString();
 
   return {

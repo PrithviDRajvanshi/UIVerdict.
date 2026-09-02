@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -15,7 +15,10 @@ type RegisterFormData = z.infer<typeof registerSchema>;
 
 export const RegisterForm: React.FC = () => {
   const navigate = useNavigate();
-  const { login } = useAuth();
+  const { register: registerAuth } = useAuth();
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
   const {
     register,
     handleSubmit,
@@ -24,9 +27,17 @@ export const RegisterForm: React.FC = () => {
     resolver: zodResolver(registerSchema),
   });
 
-  const onSubmit = (data: RegisterFormData) => {
-    login();
-    navigate('/report/749-X2');
+  const onSubmit = async (data: RegisterFormData) => {
+    try {
+      setAuthError(null);
+      setSubmitting(true);
+      await registerAuth(data.name, data.email, data.password);
+      navigate('/archive');
+    } catch (err: any) {
+      setAuthError(err?.message || 'Registration failed. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -36,14 +47,22 @@ export const RegisterForm: React.FC = () => {
         <p className="font-mono-data text-mono-data text-[#888888]">Create analyst credentials for research portal</p>
       </div>
 
+      {authError && (
+        <div className="mb-4 p-3 bg-red-950/80 border border-red-800 text-red-300 font-mono-data text-xs flex items-center gap-2">
+          <span className="material-symbols-outlined text-sm text-red-400">error</span>
+          <span>{authError}</span>
+        </div>
+      )}
+
       <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
         <div>
           <label className="block font-label-sm text-label-sm uppercase text-[#888888] mb-2">Full Name / Title</label>
           <input
             {...register('name')}
             type="text"
-            placeholder="Dr. Alan Turing"
+            placeholder="Jane Doe"
             className="tech-input w-full p-3 font-body-md text-primary bg-[#090909] border-[#2a2a2a]"
+            disabled={submitting}
           />
           {errors.name && <span className="text-[#ffb4ab] text-xs mt-1 block">{errors.name.message}</span>}
         </div>
@@ -55,6 +74,7 @@ export const RegisterForm: React.FC = () => {
             type="email"
             placeholder="analyst@uiverdict.io"
             className="tech-input w-full p-3 font-body-md text-primary bg-[#090909] border-[#2a2a2a]"
+            disabled={submitting}
           />
           {errors.email && <span className="text-[#ffb4ab] text-xs mt-1 block">{errors.email.message}</span>}
         </div>
@@ -66,15 +86,17 @@ export const RegisterForm: React.FC = () => {
             type="password"
             placeholder="••••••••"
             className="tech-input w-full p-3 font-body-md text-primary bg-[#090909] border-[#2a2a2a]"
+            disabled={submitting}
           />
           {errors.password && <span className="text-[#ffb4ab] text-xs mt-1 block">{errors.password.message}</span>}
         </div>
 
         <button
           type="submit"
-          className="tech-button w-full py-3 mt-4 font-headline-md text-headline-md uppercase tracking-wider bg-primary text-[#090909] cursor-pointer"
+          disabled={submitting}
+          className="tech-button w-full py-3 mt-4 font-headline-md text-headline-md uppercase tracking-wider bg-primary text-[#090909] cursor-pointer disabled:opacity-50"
         >
-          CREATE ACCOUNT
+          {submitting ? 'CREATING ACCOUNT...' : 'CREATE ACCOUNT'}
         </button>
       </form>
 

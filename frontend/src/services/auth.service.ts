@@ -1,7 +1,77 @@
-export async function loginUser(data: any): Promise<never> {
-  throw new Error('Backend Authentication not implemented. Using frontend mock state.');
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+
+export interface User {
+  id: string;
+  name: string;
+  email: string;
 }
 
-export async function registerUser(data: any): Promise<never> {
-  throw new Error('Backend Registration not implemented. Using frontend mock state.');
+export interface AuthResponse {
+  status: string;
+  message?: string;
+  data: {
+    user: User;
+    token?: string;
+  };
+}
+
+export async function registerUser(name: string, email: string, password: string): Promise<User> {
+  const response = await fetch(`${API_URL}/api/v1/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, email, password }),
+    credentials: 'include',
+  });
+
+  const json = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(json?.message || 'Registration failed. Please try again.');
+  }
+
+  return json.data.user;
+}
+
+export async function loginUser(email: string, password: string): Promise<User> {
+  const response = await fetch(`${API_URL}/api/v1/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+    credentials: 'include',
+  });
+
+  const json = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(json?.message || 'Invalid email or password.');
+  }
+
+  return json.data.user;
+}
+
+export async function logoutUser(): Promise<void> {
+  await fetch(`${API_URL}/api/v1/auth/logout`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+  }).catch(() => {});
+}
+
+export async function getCurrentUser(): Promise<User | null> {
+  try {
+    const response = await fetch(`${API_URL}/api/v1/auth/me`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const json = await response.json();
+    return json.data?.user || null;
+  } catch {
+    return null;
+  }
 }
