@@ -1,6 +1,6 @@
 import { HistoryItem } from '../types/history';
+import { API_URL } from '../config/api.config';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
 export interface ArchivePagination {
   page: number;
