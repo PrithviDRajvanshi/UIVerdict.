@@ -1,8 +1,8 @@
 import analysisMock from '../data/analysis.json';
 import { AnalysisOverviewData } from '../types/analysis';
 import { ReportData } from '../types/report';
+import { API_URL } from '../config/api.config';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
 export interface BackendScreenshot {
   filename: string;
