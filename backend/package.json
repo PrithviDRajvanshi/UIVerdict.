@@ -5,7 +5,7 @@
   "description": "Backend service for UIVerdict",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc",
+    "build": "prisma generate && tsc",
     "start": "node dist/server.js",
     "dev": "ts-node src/server.ts",
     "test": "ts-node tests/auth.service.test.ts && ts-node tests/gemini.service.test.ts && ts-node tests/persistence.service.test.ts"
