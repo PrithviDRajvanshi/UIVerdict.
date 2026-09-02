@@ -2,6 +2,7 @@ import express, { Application } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import cookieParser from 'cookie-parser';
 import routes from './routes';
 import { notFoundHandler } from './middleware/notFound';
 import { errorHandler } from './middleware/errorHandler';
@@ -26,6 +27,7 @@ app.use(
   })
 );
 app.use(morgan('dev'));
+app.use(cookieParser());
 app.use(express.json());
 
 // Application routes

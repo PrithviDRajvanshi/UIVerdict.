@@ -15,25 +15,45 @@ export interface LighthouseMetrics {
 }
 
 export class LighthouseService {
-  public async runAudit(targetUrl: string): Promise<LighthouseMetrics> {
+  private async runSingleAudit(targetUrl: string, attempt: number, maxAttempts: number): Promise<LighthouseMetrics> {
     let chrome: chromeLauncher.LaunchedChrome | null = null;
+
+    console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Launching Chrome for URL: ${targetUrl}`);
 
     try {
       chrome = await chromeLauncher.launch({
-        chromeFlags: ['--headless', '--no-sandbox', '--disable-gpu'],
+        chromeFlags: [
+          '--headless=new',
+          '--no-sandbox',
+          '--disable-gpu',
+          '--disable-dev-shm-usage',
+          '--disable-software-rasterizer',
+          '--no-first-run',
+        ],
       });
+
+      console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Dedicated Chrome listening on port ${chrome.port}`);
 
       const lighthouseModule = await import('lighthouse');
       const lighthouse = lighthouseModule.default || lighthouseModule;
 
-      const options = {
+      const flags = {
         logLevel: 'error' as const,
         output: 'json' as const,
         onlyCategories: ['performance', 'accessibility', 'best-practices', 'seo'],
         port: chrome.port,
       };
 
-      const runnerResult = await (lighthouse as any)(targetUrl, options);
+      const config = {
+        extends: 'lighthouse:default',
+        settings: {
+          maxWaitForFcp: 45000,
+          maxWaitForLoad: 60000,
+        },
+      };
+
+      console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Running audit...`);
+      const runnerResult = await (lighthouse as any)(targetUrl, flags, config);
 
       if (!runnerResult || !runnerResult.lhr) {
         throw new ApiError(500, 'Lighthouse audit produced no results');
@@ -51,7 +71,7 @@ export class LighthouseService {
         return audit && audit.displayValue ? audit.displayValue : 'N/A';
       };
 
-      return {
+      const metrics: LighthouseMetrics = {
         performance: getScore('performance'),
         accessibility: getScore('accessibility'),
         bestPractices: getScore('best-practices'),
@@ -63,19 +83,45 @@ export class LighthouseService {
         cumulativeLayoutShift: getDisplayValue('cumulative-layout-shift'),
         timeToInteractive: getDisplayValue('interactive'),
       };
-    } catch (error: any) {
-      if (error instanceof ApiError) {
-        throw error;
-      }
-      const message = error?.message || 'Lighthouse audit failed';
-      throw new ApiError(500, `Lighthouse audit failure: ${message}`);
+
+      console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Completed successfully with performance score ${metrics.performance}`);
+      return metrics;
     } finally {
       if (chrome) {
+        console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Cleaning up Chrome process...`);
         try {
           await chrome.kill();
-        } catch {}
+        } catch (killErr) {
+          console.error('[Lighthouse] Warning closing Chrome:', killErr);
+        }
       }
     }
+  }
+
+  public async runAudit(targetUrl: string): Promise<LighthouseMetrics> {
+    const MAX_ATTEMPTS = 2;
+    let lastError: any = null;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        return await this.runSingleAudit(targetUrl, attempt, MAX_ATTEMPTS);
+      } catch (error: any) {
+        lastError = error;
+        const errMessage = error?.message || 'Unknown Lighthouse error';
+        console.error(`[Lighthouse] Attempt ${attempt}/${MAX_ATTEMPTS} failed: ${errMessage}`);
+
+        if (attempt < MAX_ATTEMPTS) {
+          console.log(`[Lighthouse] Waiting 2000ms before retrying Lighthouse audit...`);
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+      }
+    }
+
+    if (lastError instanceof ApiError) {
+      throw lastError;
+    }
+    const finalMsg = lastError?.message || 'Lighthouse audit failed after retries';
+    throw new ApiError(500, `Lighthouse audit failure: ${finalMsg}`);
   }
 }
 
