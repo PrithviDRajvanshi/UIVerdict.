@@ -6,17 +6,15 @@ import { storeReport } from '../../services/report.service';
 interface Stage {
   id: string;
   label: string;
-  threshold: number; // Progress percentage when completed
+  threshold: number; // Progress percentage when stage begins
 }
 
 const STAGES: Stage[] = [
-  { id: '1', label: 'URL Validation', threshold: 15 },
-  { id: '2', label: 'Launching Browser', threshold: 30 },
-  { id: '3', label: 'Capturing Screenshot', threshold: 45 },
-  { id: '4', label: 'Running Lighthouse', threshold: 60 },
-  { id: '5', label: 'Accessibility Audit', threshold: 75 },
-  { id: '6', label: 'AI UI/UX Evaluation', threshold: 90 },
-  { id: '7', label: 'Generating Report', threshold: 100 },
+  { id: '1', label: 'Validating Target URL', threshold: 5 },
+  { id: '2', label: 'Capturing High-Res Screenshot', threshold: 20 },
+  { id: '3', label: 'Auditing Performance & Accessibility', threshold: 50 },
+  { id: '4', label: 'Qualitative UI/UX Evaluation', threshold: 75 },
+  { id: '5', label: 'Persisting Snapshots & Finalizing Verdict', threshold: 95 },
 ];
 
 export const AnalysisPage: React.FC = () => {
@@ -32,82 +30,70 @@ export const AnalysisPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const activeUrlRef = useRef<string | null>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const hasFiredRef = useRef<string | null>(null);
+
+  // Smoothly advance visual progress stage indicators while HTTP request is in-flight
+  useEffect(() => {
+    if (!loading) return;
+
+    const interval = setInterval(() => {
+      setProgress((prev) => {
+        if (prev < 20) return prev + 3;
+        if (prev < 50) return prev + 2;
+        if (prev < 75) return prev + 1;
+        if (prev < 95) return prev + 1;
+        return 95; // Hold at 95% until actual backend response resolves
+      });
+    }, 700);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [loading]);
 
   useEffect(() => {
     if (!urlToAnalyze) return;
 
-    if (activeUrlRef.current === urlToAnalyze) {
+    // Prevent duplicate requests for the same URL
+    if (hasFiredRef.current === urlToAnalyze) {
       return;
     }
 
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
+    hasFiredRef.current = urlToAnalyze;
 
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    activeUrlRef.current = urlToAnalyze;
-
-    let isMounted = true;
+    console.log('[Analysis UI] Starting request for URL:', urlToAnalyze);
     setLoading(true);
     setError(null);
     setProgress(5);
 
-    const interval = setInterval(() => {
-      setProgress((prev) => {
-        if (prev >= 92) {
-          return 92;
-        }
-        return prev + 3;
-      });
-    }, 600);
-
-    analyzeWebsite(urlToAnalyze, controller.signal)
+    analyzeWebsite(urlToAnalyze)
       .then((data) => {
-        if (!isMounted) return;
-        clearInterval(interval);
-        activeUrlRef.current = null;
+        console.log('[Analysis UI] Response received:', data);
+
         const reportData = mapBackendToReportData(data);
+        console.log('[Analysis UI] Parsed report data:', reportData);
         storeReport(reportData);
+
+        // Transition to 100% completion state
         setProgress(100);
         setLoading(false);
+        hasFiredRef.current = null;
 
-        setTimeout(() => {
-          if (isMounted) {
-            navigate(`/report/${reportData.evaluationId}`, { state: { report: reportData } });
-          }
-        }, 400);
+        console.log('[Analysis UI] Navigating to report:', reportData.evaluationId);
+        navigate(`/report/${reportData.evaluationId}`, { state: { report: reportData } });
       })
       .catch((err) => {
-        if (!isMounted) return;
-        clearInterval(interval);
-        if (err?.name === 'AbortError') {
-          return;
-        }
-        activeUrlRef.current = null;
+        console.error('[Analysis UI] Request failed:', err);
+        hasFiredRef.current = null;
+
         setLoading(false);
         setError(err?.message || 'Unable to analyze this website right now. Please try again.');
       });
-
-    return () => {
-      isMounted = false;
-      clearInterval(interval);
-      if (activeUrlRef.current === urlToAnalyze) {
-        activeUrlRef.current = null;
-      }
-      if (abortControllerRef.current === controller) {
-        controller.abort();
-        abortControllerRef.current = null;
-      }
-    };
   }, [urlToAnalyze, navigate]);
 
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (loading || activeUrlRef.current) return;
-    setError(null);
+    if (loading) return;
 
     const trimmed = inputUrl.trim();
     if (!trimmed) {
@@ -127,6 +113,8 @@ export const AnalysisPage: React.FC = () => {
       return;
     }
 
+    hasFiredRef.current = null;
+    setError(null);
     setUrlToAnalyze(validUrl);
   };
 
@@ -205,8 +193,8 @@ export const AnalysisPage: React.FC = () => {
             {/* Live Analysis Progress Stages */}
             <div className="flex flex-col gap-3 mt-2">
               {STAGES.map((stage, idx) => {
-                const isCompleted = progress >= stage.threshold;
-                const isCurrent = progress < stage.threshold && (idx === 0 || progress >= STAGES[idx - 1].threshold);
+                const isCompleted = idx < STAGES.length - 1 ? progress >= STAGES[idx + 1].threshold : progress === 100;
+                const isCurrent = !isCompleted && (idx === 0 || progress >= STAGES[idx].threshold);
 
                 return (
                   <div
