@@ -6,7 +6,7 @@
   "main": "dist/server.js",
   "scripts": {
     "build": "prisma generate && tsc",
-    "start": "node dist/server.js",
+    "start": "prisma migrate deploy && node dist/server.js",
     "dev": "ts-node src/server.ts",
     "test": "ts-node tests/auth.service.test.ts && ts-node tests/gemini.service.test.ts && ts-node tests/persistence.service.test.ts"
   },
