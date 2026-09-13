@@ -25,24 +25,38 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
 
   return (
     <div className="md:col-span-4 bg-[#151515] border border-[#2a2a2a] flex flex-col h-full">
-      <div className="border-b border-[#2a2a2a] p-4">
-        <h2 className="font-headline-md text-headline-md uppercase text-primary">Overall Verdict</h2>
+      <div className="border-b border-[#2a2a2a] p-4 flex justify-between items-center">
+        <h2 className="font-headline-md text-headline-md uppercase text-primary">Global UIVerdict</h2>
+        <span className="font-mono-data text-[10px] text-[#80DEEA] uppercase tracking-wider">AI Evaluation</span>
       </div>
       <div className="p-6 flex-grow flex flex-col gap-6">
-        <div className="flex items-center gap-6">
-          <div className="text-[84px] font-bold leading-none tracking-tighter text-primary">
-            {overallScore}
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-6">
+            <div className="text-[84px] font-bold leading-none tracking-tighter text-primary">
+              {overallScore}
+            </div>
+            <div className="flex flex-col">
+              <span className="font-label-sm text-label-sm text-[#888888] uppercase">Verdict</span>
+              <span className="font-label-sm text-label-sm text-[#f5f5f5] border border-[#2a2a2a] px-2 py-1 mt-1 uppercase">
+                {verdictStatus}
+              </span>
+            </div>
           </div>
-          <div className="flex flex-col">
-            <span className="font-label-sm text-label-sm text-[#888888] uppercase">Global Score</span>
-            <span className="font-label-sm text-label-sm text-[#f5f5f5] border border-[#2a2a2a] px-2 py-1 mt-1 uppercase">
-              {verdictStatus}
-            </span>
-          </div>
+          <p className="font-mono-data text-[11px] text-[#888888] tracking-wide mt-1">
+            AI-powered holistic UX/UI evaluation
+          </p>
         </div>
         <hr className="border-[#2a2a2a] border-t-1" />
         {isAuthenticated ? (
           <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-0.5 pb-1">
+              <span className="font-mono-data text-xs text-[#80DEEA] uppercase font-bold tracking-wider">
+                Technical Audit (Lighthouse)
+              </span>
+              <span className="font-mono-data text-[10px] text-[#777777]">
+                Objective technical evidence — not averaged into score
+              </span>
+            </div>
             <div>
               <div className="flex justify-between font-mono-data text-mono-data mb-1 text-primary">
                 <span>PERFORMANCE</span>

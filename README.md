@@ -406,9 +406,8 @@ sequenceDiagram
     PW-->>Service: Return screenshot path & filename
     Service->>LH: runAudit(url)
     LH-->>Service: Return Lighthouse metrics (FCP, LCP, A11y, etc.)
-    Service->>Service: Calculate globalScore (Weighted formula)
-    Service->>AI: generateAnalysis(metrics, screenshot, globalScore)
-    AI-->>Service: Return structured JSON (Critique, Strengths, Refinements)
+    Service->>AI: generateAnalysis(metrics, screenshot)
+    AI-->>Service: Return holistic UIVerdict JSON (Independent score, verdict label, critique, strengths, refinements)
     Service->>MG: saveSnapshot(analysisId, metrics, aiAnalysis, screenshot)
     MG-->>Service: Return mongoSnapshot._id
     Service->>PG: updateAnalysisStatus(analysisId, COMPLETED, mongoDocumentId)
