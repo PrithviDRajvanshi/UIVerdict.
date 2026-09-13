@@ -177,18 +177,14 @@ public async analyzeUrl(url: string, userId?: string): Promise<AnalysisResponse>
     // Phase 3: Lighthouse Performance & Accessibility Audit
     const metrics: LighthouseMetrics = await lighthouseService.runAudit(url);
 
-    // Phase 4: Deterministic Global Score Calculation
-    const globalScore = this.calculateGlobalScore(metrics);
-
-    // Phase 5: Qualitative Gemini AI Evaluation
+    // Phase 4: Holistic Gemini AI Evaluation (Independent Score & Qualitative Critique)
     const aiAnalysis: AiAnalysis = await geminiService.generateAnalysis({
       url,
       metrics,
       screenshot: screenshotData,
-      globalScore,
     });
 
-    // Phase 6: MongoDB Document Snapshot Storage
+    // Phase 5: MongoDB Document Snapshot Storage
     const mongoSnapshot = await mongoRepository.saveSnapshot({
       analysisId: analysis.id,
       url,
@@ -197,7 +193,7 @@ public async analyzeUrl(url: string, userId?: string): Promise<AnalysisResponse>
       aiAnalysis,
     });
 
-    // Phase 7: PostgreSQL Status Update to COMPLETED
+    // Phase 6: PostgreSQL Status Update to COMPLETED
     await postgresRepository.updateAnalysisStatus(
       analysis.id,
       AnalysisStatus.COMPLETED,
@@ -218,8 +214,11 @@ public async analyzeUrl(url: string, userId?: string): Promise<AnalysisResponse>
 }
 ```
 
-### 5.1 Global Score Calculation Formula
-$$\text{GlobalScore} = \text{Math.round}\left((0.30 \times \text{Perf} + 0.25 \times \text{A11y} + 0.20 \times \text{BestPractices} + 0.25 \times \text{SEO}) \times 10\right) / 10$$
+### 5.1 Holistic UIVerdict Evaluation Architecture
+The UIVerdict composite score is an independent, holistic UX/UI evaluation generated directly by Gemini:
+- **Lighthouse Responsibility**: Provides objective, measured technical evidence (Performance, Accessibility, Best Practices, SEO, and Core Web Vitals).
+- **Gemini Responsibility**: Evaluates visual hierarchy, layout quality, typography, navigation clarity, affordances, perceived usability, practical accessibility, and perceived performance to generate the authoritative UIVerdict score ($0\text{--}100$) and rubric-aligned verdict label.
+- **No Backend Weighting**: The backend does NOT average or calculate any weighted formula of Lighthouse categories.
 
 ---
 

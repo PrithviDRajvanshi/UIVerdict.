@@ -193,10 +193,9 @@ sequenceDiagram
     end
 
     rect rgb(35, 35, 25)
-        note right of Orchestrator: Phase 4: AI Critique Generation
-        Orchestrator->>Orchestrator: calculateGlobalScore(metrics)
-        Orchestrator->>AI: generateAnalysis(metrics, screenshot, globalScore)
-        AI-->>Orchestrator: Return AiAnalysis JSON
+        note right of Orchestrator: Phase 4: Holistic AI Evaluation
+        Orchestrator->>AI: generateAnalysis(metrics, screenshot)
+        AI-->>Orchestrator: Return AiAnalysis JSON (UIVerdict Score + Critique)
     end
 
     rect rgb(25, 35, 35)

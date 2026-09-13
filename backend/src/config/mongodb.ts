@@ -1,3 +1,4 @@
+import dns from 'dns';
 import mongoose from 'mongoose';
 import { config } from './env';
 
@@ -6,6 +7,7 @@ export async function connectMongoDB(): Promise<void> {
     if (mongoose.connection.readyState >= 1) {
       return;
     }
+    dns.setServers(['1.1.1.1', '8.8.8.8']);
     await mongoose.connect(config.mongodbUri, {
       serverSelectionTimeoutMS: 5000,
     });

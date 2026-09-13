@@ -23,15 +23,6 @@ export interface AnalysisResponse {
 }
 
 export class AnalysisService {
-  public calculateGlobalScore(metrics: LighthouseMetrics): number {
-    const score =
-      metrics.performance * 0.30 +
-      metrics.accessibility * 0.25 +
-      metrics.bestPractices * 0.20 +
-      metrics.seo * 0.25;
-    return Math.round(score * 10) / 10;
-  }
-
   public async analyzeUrl(url: string, userId?: string): Promise<AnalysisResponse> {
     let analysisId: string | null = null;
 
@@ -46,15 +37,11 @@ export class AnalysisService {
       // 3. Run Lighthouse performance, accessibility, best-practices, and SEO audit
       const metrics: LighthouseMetrics = await lighthouseService.runAudit(url);
 
-      // 4. Calculate deterministic global score
-      const globalScore = this.calculateGlobalScore(metrics);
-
-      // 5. Generate Gemini AI qualitative analysis based on real metrics & evidence
+      // 4. Generate holistic Gemini AI UI/UX evaluation (independent score + qualitative critique)
       const aiAnalysis: AiAnalysis = await geminiService.generateAnalysis({
         url,
         metrics,
         screenshot: screenshotData,
-        globalScore,
       });
 
       // 6. Persist full analysis snapshot document in MongoDB
