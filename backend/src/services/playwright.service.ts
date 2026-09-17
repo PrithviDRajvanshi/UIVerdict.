@@ -45,10 +45,24 @@ export class PlaywrightService {
       this.ensureTempDirExists();
 
       try {
-        browser = await chromium.launch({
+        const launchOptions: Parameters<typeof chromium.launch>[0] = {
           headless: true,
-        });
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--no-first-run',
+          ],
+        };
+
+        if (process.env.CHROME_PATH) {
+          launchOptions.executablePath = process.env.CHROME_PATH;
+        }
+
+        browser = await chromium.launch(launchOptions);
       } catch (error) {
+        console.error('[Playwright] Failed to launch browser instance:', error);
         throw new ApiError(500, 'Failed to launch browser instance');
       }
 
