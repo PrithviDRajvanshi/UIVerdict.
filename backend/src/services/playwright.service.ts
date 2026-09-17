@@ -45,8 +45,27 @@ export class PlaywrightService {
       this.ensureTempDirExists();
 
       try {
+        let pwVersion = 'unknown';
+        try {
+          pwVersion = require('playwright/package.json').version;
+        } catch {
+          // Ignore version lookup failure
+        }
+        const defaultExecutablePath = chromium.executablePath();
+        const hasChromePath = Boolean(process.env.CHROME_PATH);
+        const chromePathVal = process.env.CHROME_PATH ? path.normalize(process.env.CHROME_PATH) : 'none';
+
+        console.log('[Playwright] Diagnostic info:', {
+          playwrightVersion: pwVersion,
+          defaultExecutablePath,
+          hasChromePath,
+          chromePath: chromePathVal,
+        });
+
         const launchOptions: Parameters<typeof chromium.launch>[0] = {
           headless: true,
+          channel: 'chromium',
+          timeout: 30000,
           args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -56,11 +75,15 @@ export class PlaywrightService {
           ],
         };
 
-        if (process.env.CHROME_PATH) {
-          launchOptions.executablePath = process.env.CHROME_PATH;
-        }
+        console.log('[Playwright] Launching browser with options:', {
+          headless: launchOptions.headless,
+          channel: launchOptions.channel,
+          timeout: launchOptions.timeout,
+          args: launchOptions.args,
+        });
 
         browser = await chromium.launch(launchOptions);
+        console.log('[Playwright] Browser launched successfully');
       } catch (error) {
         console.error('[Playwright] Failed to launch browser instance:', error);
         throw new ApiError(500, 'Failed to launch browser instance');
