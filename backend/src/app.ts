@@ -21,10 +21,14 @@ const defaultLocalOrigins = [
 ];
 
 const envOrigins = process.env.FRONTEND_URL
-  ? process.env.FRONTEND_URL.split(',').map((url) => url.trim()).filter(Boolean)
+  ? process.env.FRONTEND_URL.split(',')
+      .map((url) => url.trim().replace(/\/+$/, ''))
+      .filter(Boolean)
   : [];
 
-const allowedOrigins = Array.from(new Set([...defaultLocalOrigins, ...envOrigins]));
+const allowedOrigins = Array.from(
+  new Set([...defaultLocalOrigins.map((url) => url.replace(/\/+$/, '')), ...envOrigins])
+);
 
 app.use(
   cors({
@@ -34,7 +38,8 @@ app.use(
         return callback(null, true);
       }
 
-      if (allowedOrigins.includes(origin) || process.env.NODE_ENV === 'development') {
+      const normalizedOrigin = origin.replace(/\/+$/, '');
+      if (allowedOrigins.includes(normalizedOrigin) || process.env.NODE_ENV === 'development') {
         return callback(null, true);
       }
 
