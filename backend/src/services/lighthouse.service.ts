@@ -1,4 +1,5 @@
 import * as chromeLauncher from 'chrome-launcher';
+import { chromium } from 'playwright';
 import { ApiError } from '../errors/ApiError';
 
 export interface LighthouseMetrics {
@@ -20,8 +21,11 @@ export class LighthouseService {
 
     console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Launching Chrome for URL: ${targetUrl}`);
 
+    const chromePath = process.env.CHROME_PATH || chromium.executablePath();
+
     try {
       chrome = await chromeLauncher.launch({
+        chromePath,
         chromeFlags: [
           '--headless=new',
           '--no-sandbox',
