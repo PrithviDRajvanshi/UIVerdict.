@@ -9,10 +9,10 @@ interface SavedReportResponse {
     createdAt: string;
     aiStatus: 'AVAILABLE' | 'UNAVAILABLE';
     metrics: {
-      performance: number;
-      accessibility: number;
-      bestPractices: number;
-      seo: number;
+      performance: number | null;
+      accessibility: number | null;
+      bestPractices: number | null;
+      seo: number | null;
       firstContentfulPaint: string;
       largestContentfulPaint: string;
       speedIndex: string;
@@ -57,7 +57,7 @@ export async function fetchReportById(id: string): Promise<ReportData> {
       largestContentfulPaint: saved.metrics.largestContentfulPaint,
       speedIndex: saved.metrics.speedIndex,
       totalBlockingTime: saved.metrics.totalBlockingTime,
-      cumulativeLayoutShift: Number.isFinite(cls) ? cls : 0,
+      cumulativeLayoutShift: Number.isFinite(cls) ? cls : null,
       timeToInteractive: saved.metrics.timeToInteractive,
     },
     qualitativeCritique: saved.aiAnalysis?.qualitativeCritique ?? [],

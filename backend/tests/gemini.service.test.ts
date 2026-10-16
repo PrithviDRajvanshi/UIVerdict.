@@ -3,6 +3,8 @@ import fs from 'fs';
 import path from 'path';
 import { GeminiService } from '../src/services/gemini.service';
 import { config } from '../src/config/env';
+import { calculateOverallScore } from '../src/services/scoring.service';
+import { resolveVerdictLabel } from '../src/validators/aiAnalysis.validator';
 
 const screenshotDir = path.resolve(process.cwd(), 'temp', 'screenshots');
 const screenshotPath = path.join(screenshotDir, 'gemini-mock.png');
@@ -14,7 +16,9 @@ const valid = {
 };
 const input: any = {
   url: 'https://example.com',
-  metrics: { performance: 80, accessibility: 80, bestPractices: 80, seo: 80 },
+  metrics: { performance: 80, accessibility: 80, bestPractices: 80, seo: 80,
+    firstContentfulPaint: '1.0 s', largestContentfulPaint: '2.0 s', speedIndex: '1.2 s',
+    totalBlockingTime: '100 ms', cumulativeLayoutShift: '0.01', timeToInteractive: '2.5 s' },
   screenshot: { url: 'https://example.com', filename: 'gemini-mock.png', path: 'temp/screenshots/gemini-mock.png' },
 };
 
@@ -41,12 +45,23 @@ async function run() {
     let primaryRequest: any;
     const primary = makeService(async (req) => { primaryRequest = req; return { text: JSON.stringify(valid) }; });
     const primaryResult = await primary.service.generateAnalysis(input);
-    assert.deepStrictEqual(primaryResult.overallVerdict, valid.overallVerdict);
+    const expectedScore = calculateOverallScore(valid.overallVerdict.score, input.metrics);
+    assert.deepStrictEqual(primaryResult.overallVerdict, { score: expectedScore, label: resolveVerdictLabel(expectedScore) });
     assert.strictEqual(primary.calls(), 1, 'primary success should make one call');
     assert.strictEqual(primaryRequest.contents.length, 2, 'text prompt and screenshot remain multimodal input');
     assert.strictEqual(primaryRequest.contents[1].inlineData.mimeType, 'image/png');
     assert.ok(primaryRequest.config.responseSchema && primaryRequest.config.responseMimeType === 'application/json');
     assert.ok(primaryRequest.config.systemInstruction);
+    assert.strictEqual(primaryRequest.config.temperature, 0, 'the qualitative model request uses deterministic sampling settings');
+
+    const inconsistentModelLabel = makeService(async () => ({ text: JSON.stringify({
+      ...valid, overallVerdict: { score: 95, label: 'POOR' },
+    }) }));
+    const normalizedResult = await inconsistentModelLabel.service.generateAnalysis(input);
+    const normalizedScore = calculateOverallScore(95, input.metrics);
+    assert.strictEqual(normalizedResult.overallVerdict.score, normalizedScore);
+    assert.strictEqual(normalizedResult.overallVerdict.label, resolveVerdictLabel(normalizedScore),
+      'a model-proposed label that conflicts with the final score is replaced');
 
     const fallbackModels: string[] = [];
     const fallback = makeService(async (req) => {

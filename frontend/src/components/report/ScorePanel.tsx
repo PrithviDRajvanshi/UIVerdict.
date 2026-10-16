@@ -20,7 +20,7 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
     metrics.largestContentfulPaint ||
     metrics.speedIndex ||
     metrics.totalBlockingTime ||
-    metrics.cumulativeLayoutShift !== undefined ||
+    metrics.cumulativeLayoutShift != null ||
     metrics.timeToInteractive;
 
   return (
@@ -54,46 +54,46 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
                 Technical Audit (Lighthouse)
               </span>
               <span className="font-mono-data text-[10px] text-[#777777]">
-                Objective technical evidence — not averaged into score
+                Lighthouse dimensions shown separately and included in overall score
               </span>
             </div>
             <div>
               <div className="flex justify-between font-mono-data text-mono-data mb-1 text-primary">
                 <span>PERFORMANCE</span>
-                <span>{metrics.performance}</span>
+                <span>{metrics.performance ?? '—'}</span>
               </div>
               <div className="h-2 progress-bar-bg w-full">
-                <div className="h-full progress-bar-fill" style={{ width: `${metrics.performance}%` }} />
+                {metrics.performance !== null && <div className="h-full progress-bar-fill" style={{ width: `${metrics.performance}%` }} />}
               </div>
             </div>
 
             <div>
               <div className="flex justify-between font-mono-data text-mono-data mb-1 text-primary">
                 <span>ACCESSIBILITY</span>
-                <span>{metrics.accessibility}</span>
+                <span>{metrics.accessibility ?? '—'}</span>
               </div>
               <div className="h-2 progress-bar-bg w-full">
-                <div className="h-full progress-bar-fill" style={{ width: `${metrics.accessibility}%` }} />
+                {metrics.accessibility !== null && <div className="h-full progress-bar-fill" style={{ width: `${metrics.accessibility}%` }} />}
               </div>
             </div>
 
             <div>
               <div className="flex justify-between font-mono-data text-mono-data mb-1 text-primary">
                 <span>BEST PRACTICES</span>
-                <span>{metrics.bestPractices}</span>
+                <span>{metrics.bestPractices ?? '—'}</span>
               </div>
               <div className="h-2 progress-bar-bg w-full">
-                <div className="h-full progress-bar-fill" style={{ width: `${metrics.bestPractices}%` }} />
+                {metrics.bestPractices !== null && <div className="h-full progress-bar-fill" style={{ width: `${metrics.bestPractices}%` }} />}
               </div>
             </div>
 
             <div>
               <div className="flex justify-between font-mono-data text-mono-data mb-1 text-primary">
                 <span>SEO STRUCTURE</span>
-                <span>{metrics.seoStructure}</span>
+                <span>{metrics.seoStructure ?? '—'}</span>
               </div>
               <div className="h-2 progress-bar-bg w-full">
-                <div className="h-full progress-bar-fill" style={{ width: `${metrics.seoStructure}%` }} />
+                {metrics.seoStructure !== null && <div className="h-full progress-bar-fill" style={{ width: `${metrics.seoStructure}%` }} />}
               </div>
             </div>
 
@@ -127,7 +127,7 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
                       <span className="text-primary font-bold">{metrics.totalBlockingTime}</span>
                     </div>
                   )}
-                  {metrics.cumulativeLayoutShift !== undefined && (
+                  {metrics.cumulativeLayoutShift != null && (
                     <div className="bg-[#090909] p-2 border border-[#2a2a2a] flex justify-between">
                       <span className="text-[#888888]">CLS:</span>
                       <span className="text-primary font-bold">{metrics.cumulativeLayoutShift}</span>

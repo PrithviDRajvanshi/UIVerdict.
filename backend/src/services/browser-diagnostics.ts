@@ -83,6 +83,7 @@ export interface PlaywrightDiagnosticMetadata {
   screenshotStartedAt: string | null;
   screenshotDurationMs: number | null;
   screenshotCompletedAt: string | null;
+  screenshotError: string | null;
   mainFrameNavigations: string[];
   navigationResponses: Array<{ url: string; status: number }>;
   httpErrorResponses: Array<{ url: string; status: number }>;
@@ -212,6 +213,7 @@ export function sanitizePlaywrightDiagnostics(input: any): PlaywrightDiagnosticM
     screenshotStartedAt: typeof input?.screenshotStartedAt === 'string' ? input.screenshotStartedAt.slice(0, 40) : null,
     screenshotDurationMs: safeCount(input?.screenshotDurationMs),
     screenshotCompletedAt: typeof input?.screenshotCompletedAt === 'string' ? input.screenshotCompletedAt.slice(0, 40) : null,
+    screenshotError: input?.screenshotError ? sanitizeDiagnosticMessage(input.screenshotError) : null,
     mainFrameNavigations: boundedEvents(events.mainFrameNavigations, (url) => typeof url === 'string' ? sanitizeDiagnosticUrl(url) : null),
     navigationResponses: safeUrlStatusEvents(events.navigationResponses),
     httpErrorResponses: safeUrlStatusEvents(events.httpErrorResponses),

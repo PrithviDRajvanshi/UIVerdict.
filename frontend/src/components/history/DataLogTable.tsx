@@ -124,12 +124,12 @@ export const DataLogTable: React.FC<DataLogTableProps> = ({
                     {row.targetUrl}
                   </div>
                   <div className="col-span-2 flex flex-col justify-center items-end gap-1 text-[#F5F5F5]">
-                    <span className="font-mono-data text-mono-data text-primary">{row.score}%</span>
+                    <span className="font-mono-data text-mono-data text-primary">{row.score === null ? '—' : `${row.score}%`}</span>
                     <div className="progress-bar-bg w-full">
-                      <div
+                      {row.score !== null && <div
                         className={`progress-bar-fill ${row.status === 'FAILED' ? 'bg-[#ffb4ab]' : 'bg-[#ffffff]'}`}
                         style={{ width: `${Math.min(100, Math.max(0, row.score))}%` }}
-                      />
+                      />}
                     </div>
                   </div>
                   <div className="col-span-2 flex items-center justify-center text-[#F5F5F5]">

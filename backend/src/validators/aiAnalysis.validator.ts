@@ -21,26 +21,36 @@ export const aiAnalysisSchema = z.object({
 export type AiAnalysis = z.infer<typeof aiAnalysisSchema>;
 export type VerdictLabel = z.infer<typeof verdictLabelSchema>;
 
+export const VERDICT_THRESHOLDS = {
+  POOR: 0,
+  EXCELLENT: 90,
+  GOOD: 80,
+  SATISFACTORY: 60,
+  NEEDS_IMPROVEMENT: 40,
+} as const;
+
 /**
  * Resolves and normalizes the verdict label based on the 0-100 UIVerdict score:
  * 90-100 → EXCELLENT
  * 80-89.9 → GOOD
- * 70-79.9 → SATISFACTORY
- * 60-69.9 → NEEDS IMPROVEMENT
- * 0-59.9 → POOR
+ * 60-79.9 → SATISFACTORY
+ * 40-59.9 → NEEDS IMPROVEMENT
+ * 0-39.9 → POOR
  */
 export function resolveVerdictLabel(score: number, proposedLabel?: string): VerdictLabel {
   let expectedLabel: VerdictLabel;
-  if (score >= 90) {
+  if (score >= VERDICT_THRESHOLDS.EXCELLENT) {
     expectedLabel = 'EXCELLENT';
-  } else if (score >= 80) {
+  } else if (score >= VERDICT_THRESHOLDS.GOOD) {
     expectedLabel = 'GOOD';
-  } else if (score >= 70) {
+  } else if (score >= VERDICT_THRESHOLDS.SATISFACTORY) {
     expectedLabel = 'SATISFACTORY';
-  } else if (score >= 60) {
+  } else if (score >= VERDICT_THRESHOLDS.NEEDS_IMPROVEMENT) {
     expectedLabel = 'NEEDS IMPROVEMENT';
-  } else {
+  } else if (score >= VERDICT_THRESHOLDS.POOR) {
     expectedLabel = 'POOR';
+  } else {
+    throw new Error('Verdict score must be between 0 and 100');
   }
 
   // If proposed label matches expected, keep it; otherwise return normalized label

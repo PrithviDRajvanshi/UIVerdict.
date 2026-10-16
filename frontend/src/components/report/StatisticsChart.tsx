@@ -6,6 +6,15 @@ interface StatisticsChartProps {
 }
 
 export const StatisticsChart: React.FC<StatisticsChartProps> = ({ metrics }) => {
+  const chartValues = [metrics.performance, metrics.accessibility, metrics.bestPractices, metrics.seoStructure];
+  const chartPoints = chartValues.map((value, index) => ({
+    x: [0, 333, 666, 1000][index],
+    y: value === null ? null : 200 - Math.max(0, Math.min(100, value)) * 2,
+  }));
+  const chartSegments = chartPoints.slice(0, -1).flatMap((point, index) => {
+    const nextPoint = chartPoints[index + 1];
+    return point.y === null || nextPoint.y === null ? [] : [`${point.x},${point.y} ${nextPoint.x},${nextPoint.y}`];
+  });
   return (
     <section className="border-panel bg-panel flex flex-col mt-4">
       <div className="border-b border-[#2a2a2a] p-4 flex justify-between items-center">
@@ -32,37 +41,31 @@ export const StatisticsChart: React.FC<StatisticsChartProps> = ({ metrics }) => 
             <line stroke="#2a2a2a" strokeWidth="1" x1="0" x2="1000" y1="200" y2="200" />
 
             {/* Data Line */}
-            <polyline
-              className="transition-all duration-1000"
-              fill="none"
-              points="0,4 333,10 666,0 1000,16"
-              stroke="#80DEEA"
-              strokeWidth="2"
-            />
-            {/* Data Points */}
-            <circle cx="0" cy="4" fill="#80DEEA" r="4" />
-            <circle cx="333" cy="10" fill="#80DEEA" r="4" />
-            <circle cx="666" cy="0" fill="#80DEEA" r="4" />
-            <circle cx="1000" cy="16" fill="#80DEEA" r="4" />
+            {chartSegments.map((points, index) => (
+              <polyline key={index} className="transition-all duration-1000" fill="none" points={points} stroke="#80DEEA" strokeWidth="2" />
+            ))}
+            {chartPoints.map((point, index) => point.y === null ? null : (
+              <circle key={index} cx={point.x} cy={point.y} fill="#80DEEA" r="4" />
+            ))}
           </svg>
 
           {/* X-Axis Labels */}
           <div className="flex justify-between mt-6">
             <div className="flex flex-col items-start">
               <span className="font-label-sm text-[#888888] uppercase">Performance</span>
-              <span className="font-mono-data text-primary">{metrics.performance}</span>
+              <span className="font-mono-data text-primary">{metrics.performance ?? '—'}</span>
             </div>
             <div className="flex flex-col items-center">
               <span className="font-label-sm text-[#888888] uppercase">Accessibility</span>
-              <span className="font-mono-data text-primary">{metrics.accessibility}</span>
+              <span className="font-mono-data text-primary">{metrics.accessibility ?? '—'}</span>
             </div>
             <div className="flex flex-col items-center">
               <span className="font-label-sm text-[#888888] uppercase">Best Practices</span>
-              <span className="font-mono-data text-primary">{metrics.bestPractices}</span>
+              <span className="font-mono-data text-primary">{metrics.bestPractices ?? '—'}</span>
             </div>
             <div className="flex flex-col items-end">
               <span className="font-label-sm text-[#888888] uppercase">SEO</span>
-              <span className="font-mono-data text-primary">{metrics.seoStructure}</span>
+              <span className="font-mono-data text-primary">{metrics.seoStructure ?? '—'}</span>
             </div>
           </div>
         </div>

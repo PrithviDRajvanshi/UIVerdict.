@@ -20,10 +20,15 @@ export interface ScreenshotResult {
 
 export type PlaywrightDiagnosticsCallback = (diagnostics: PlaywrightDiagnosticMetadata) => Promise<void>;
 
+export const DEFAULT_FULL_PAGE_SCREENSHOT_TIMEOUT_MS = 60_000;
+
 export class PlaywrightService {
   private tempDir: string;
 
-  constructor() {
+  constructor(
+    private readonly screenshotTimeoutMs = DEFAULT_FULL_PAGE_SCREENSHOT_TIMEOUT_MS,
+    private readonly settlingDelayMs = 2000,
+  ) {
     this.tempDir = path.resolve(process.cwd(), 'temp', 'screenshots');
   }
 
@@ -161,7 +166,6 @@ export class PlaywrightService {
           'sec-ch-ua': '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
           'sec-ch-ua-mobile': '?0',
           'sec-ch-ua-platform': '"Windows"',
-          'Upgrade-Insecure-Requests': '1',
         },
       });
 
@@ -270,7 +274,7 @@ export class PlaywrightService {
       }
 
       // Settling period to allow visual components and fonts to stabilize
-      const settlingDelayMs = 2000;
+      const settlingDelayMs = this.settlingDelayMs;
       const settlingStartedAt = Date.now();
       try {
         await page.waitForTimeout(settlingDelayMs);
@@ -322,6 +326,7 @@ export class PlaywrightService {
         await page.screenshot({
           path: absolutePath,
           fullPage: true,
+          timeout: this.screenshotTimeoutMs,
         });
         const screenshotBytes = await fs.promises.readFile(absolutePath);
         const sha256 = crypto.createHash('sha256').update(screenshotBytes).digest('hex');
@@ -340,10 +345,33 @@ export class PlaywrightService {
         return { url: targetUrl, filename, path: relativePath, sha256 };
       } catch (error) {
         await fs.promises.unlink(absolutePath).catch(() => {});
+        const captureError = error as any;
+        const screenshotError = sanitizeDiagnosticMessage(captureError?.message || error);
+        let pageGeometry: Record<string, number> | null = null;
+        try {
+          pageGeometry = await page.evaluate(() => ({
+            viewportWidth: window.innerWidth,
+            viewportHeight: window.innerHeight,
+            documentWidth: document.documentElement?.scrollWidth ?? 0,
+            documentHeight: document.documentElement?.scrollHeight ?? 0,
+            devicePixelRatio: window.devicePixelRatio,
+          }));
+        } catch {
+          // Page may already be detached or closed; the capture error is primary.
+        }
+        console.error('[Playwright] Full-page screenshot failed:', {
+          errorName: sanitizeDiagnosticMessage(captureError?.name || 'Error'),
+          errorCode: sanitizeDiagnosticMessage(captureError?.code || 'unknown'),
+          message: screenshotError,
+          pageClosed: page.isClosed(),
+          finalUrl: sanitizeDiagnosticUrl(page.url()),
+          pageGeometry,
+        });
         if (onDiagnostics) await onDiagnostics(sanitizePlaywrightDiagnostics({
           ...baseDiagnostics,
           outcome: 'CAPTURE_FAILED',
-          navigationError: sanitizeDiagnosticMessage((error as any)?.message || error),
+          screenshotDurationMs: Date.now() - screenshotCaptureStartedAt,
+          screenshotError,
         }));
         throw new ApiError(500, 'Failed to capture full page screenshot');
       }
