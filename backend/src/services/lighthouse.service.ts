@@ -1,6 +1,16 @@
 import * as chromeLauncher from 'chrome-launcher';
 import { chromium } from 'playwright';
 import { ApiError } from '../errors/ApiError';
+import {
+  classifyLighthouseFailure,
+  classifyLighthouseResult,
+  createLighthouseSessionDiagnostics,
+  extractLighthouseNavigationResponses,
+  LighthouseDiagnosticMetadata,
+  sanitizeDiagnosticMessage,
+  sanitizeDiagnosticUrl,
+  sanitizeLighthouseDiagnostics,
+} from './browser-diagnostics';
 
 export interface LighthouseMetrics {
   performance: number;
@@ -15,11 +25,88 @@ export interface LighthouseMetrics {
   timeToInteractive: string;
 }
 
-export class LighthouseService {
-  private async runSingleAudit(targetUrl: string, attempt: number, maxAttempts: number): Promise<LighthouseMetrics> {
-    let chrome: chromeLauncher.LaunchedChrome | null = null;
+export type LighthouseDiagnosticsCallback = (diagnostics: LighthouseDiagnosticMetadata) => Promise<void>;
 
-    console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Launching Chrome for URL: ${targetUrl}`);
+async function waitForChromeExit(chrome: chromeLauncher.LaunchedChrome, timeoutMs: number): Promise<void> {
+  const child = chrome.process;
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  // `close` also waits for Chrome Launcher's stdio files to close, which only
+  // happens inside `chrome.kill()`. Wait for process `exit` to avoid deadlock.
+  let timeout: NodeJS.Timeout | undefined;
+  await Promise.race([
+    new Promise<void>((resolve) => child.once('exit', () => resolve())),
+    new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => reject(new Error('Timed out waiting for Chrome process to exit')), timeoutMs);
+    }),
+  ]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
+}
+
+async function requestGracefulChromeShutdown(port: number): Promise<void> {
+  const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(3000) });
+  if (!response.ok) throw new Error(`Chrome DevTools returned HTTP ${response.status}`);
+  const version = await response.json() as { webSocketDebuggerUrl?: string };
+  if (!version.webSocketDebuggerUrl) throw new Error('Chrome DevTools websocket URL unavailable');
+  const debuggerUrl = new URL(version.webSocketDebuggerUrl);
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(debuggerUrl.hostname) || debuggerUrl.port !== String(port)) {
+    throw new Error('Chrome DevTools websocket did not resolve to the local browser');
+  }
+
+  const socket = new WebSocket(debuggerUrl);
+  await new Promise<void>((resolve, reject) => {
+    socket.addEventListener('open', () => resolve(), { once: true });
+    socket.addEventListener('error', () => reject(new Error('Chrome DevTools websocket connection failed')), { once: true });
+  });
+  socket.send(JSON.stringify({ id: 1, method: 'Browser.close' }));
+}
+
+async function stopChromeAndWait(chrome: chromeLauncher.LaunchedChrome): Promise<void> {
+  if (chrome.process.exitCode === null && chrome.process.signalCode === null) {
+    try {
+      await requestGracefulChromeShutdown(chrome.port);
+      await waitForChromeExit(chrome, 10000);
+    } catch {
+      // Fall back to chrome-launcher's platform process-tree termination.
+      chrome.kill();
+      await waitForChromeExit(chrome, 10000);
+    }
+  }
+
+  // chrome-launcher owns its temporary profile and signal-handler registry. At this point
+  // the process tree has exited, so its synchronous profile removal no longer races locks.
+  chrome.kill();
+}
+
+export class LighthouseService {
+  private async runSingleAudit(targetUrl: string, attempt: number, maxAttempts: number, onDiagnostics?: LighthouseDiagnosticsCallback): Promise<LighthouseMetrics> {
+    let chrome: chromeLauncher.LaunchedChrome | null = null;
+    const navigationResponses: Array<{ url: string; status: number }> = [];
+    let finalUrl: string | null = null;
+    let auditStartedAt = Date.now();
+    let auditDurationMs: number | null = null;
+    let outcome: 'AUDIT_COMPLETED' | 'NAVIGATION_FAILED' | 'AUDIT_FAILED' = 'AUDIT_FAILED';
+    let failureReason: string | null = null;
+    let diagnosticsPersisted = false;
+
+    const persistDiagnostics = async (diagnosticOutcome: typeof outcome) => {
+      if (!onDiagnostics) return;
+      await onDiagnostics(sanitizeLighthouseDiagnostics({
+        ...createLighthouseSessionDiagnostics(targetUrl, finalUrl ?? undefined, undefined, auditDurationMs ?? 0),
+        outcome: diagnosticOutcome,
+        navigationResponseStatus: navigationResponses.length ? navigationResponses[navigationResponses.length - 1].status : null,
+        navigationStatusObserved: navigationResponses.length > 0,
+        navigationResponses,
+        navigationObservationError: navigationResponses.length ? null : 'Lighthouse main-document response status unavailable',
+        auditDurationMs,
+        attempt,
+        maxAttempts,
+        failureReason,
+      }));
+      diagnosticsPersisted = true;
+    };
+
+    console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Launching Chrome for URL: ${sanitizeDiagnosticUrl(targetUrl)}`);
 
     const chromePath = process.env.CHROME_PATH || chromium.executablePath();
 
@@ -57,13 +144,47 @@ export class LighthouseService {
       };
 
       console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Running audit...`);
+      auditStartedAt = Date.now();
       const runnerResult = await (lighthouse as any)(targetUrl, flags, config);
+      auditDurationMs = Date.now() - auditStartedAt;
 
       if (!runnerResult || !runnerResult.lhr) {
         throw new ApiError(500, 'Lighthouse audit produced no results');
       }
 
       const { categories, audits } = runnerResult.lhr;
+      finalUrl = runnerResult.lhr.finalDisplayedUrl ? sanitizeDiagnosticUrl(runnerResult.lhr.finalDisplayedUrl) : finalUrl;
+      navigationResponses.push(...extractLighthouseNavigationResponses(
+        audits,
+        runnerResult.artifacts?.DevtoolsLog,
+        targetUrl,
+        finalUrl,
+      ));
+      if (navigationResponses.length) finalUrl = navigationResponses[navigationResponses.length - 1].url;
+      outcome = classifyLighthouseResult(
+        runnerResult.lhr.runtimeError,
+        navigationResponses.length ? navigationResponses[navigationResponses.length - 1].status : null,
+      );
+      if (!navigationResponses.length && outcome === 'NAVIGATION_FAILED' && finalUrl) {
+        const statusMatch = String(runnerResult.lhr.runtimeError?.message || '').match(/status code:\s*(\d{3})/i);
+        const status = statusMatch ? Number(statusMatch[1]) : null;
+        if (status !== null && status >= 100 && status <= 599) navigationResponses.push({ url: finalUrl, status });
+      }
+      if (runnerResult.lhr.runtimeError) failureReason = sanitizeDiagnosticMessage(runnerResult.lhr.runtimeError.message || runnerResult.lhr.runtimeError.code || 'Lighthouse runtime error');
+      console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Session diagnostics:`, {
+        ...createLighthouseSessionDiagnostics(
+          targetUrl,
+          runnerResult.lhr.finalDisplayedUrl,
+          runnerResult.lhr.fetchTime,
+          auditDurationMs,
+        ),
+      });
+      await persistDiagnostics(outcome);
+      if (outcome !== 'AUDIT_COMPLETED') {
+        throw new ApiError(outcome === 'NAVIGATION_FAILED' ? 502 : 500, outcome === 'NAVIGATION_FAILED'
+          ? 'Lighthouse navigation failed'
+          : 'Lighthouse audit failed');
+      }
 
       const getScore = (catKey: string): number => {
         const cat = categories[catKey];
@@ -90,28 +211,35 @@ export class LighthouseService {
 
       console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Completed successfully with performance score ${metrics.performance}`);
       return metrics;
+    } catch (error: any) {
+      auditDurationMs = auditDurationMs ?? Date.now() - auditStartedAt;
+      const lastNavigationStatus = navigationResponses.length ? navigationResponses[navigationResponses.length - 1].status : null;
+      outcome = classifyLighthouseFailure(error, lastNavigationStatus);
+      failureReason = sanitizeDiagnosticMessage(error?.message || error);
+      if (!diagnosticsPersisted) await persistDiagnostics(outcome);
+      throw error;
     } finally {
       if (chrome) {
         console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Cleaning up Chrome process...`);
         try {
-          await chrome.kill();
+          await stopChromeAndWait(chrome);
         } catch (killErr) {
-          console.error('[Lighthouse] Warning closing Chrome:', killErr);
+          console.error('[Lighthouse] Warning closing Chrome:', sanitizeDiagnosticMessage((killErr as any)?.message || killErr));
         }
       }
     }
   }
 
-  public async runAudit(targetUrl: string): Promise<LighthouseMetrics> {
+  public async runAudit(targetUrl: string, onDiagnostics?: LighthouseDiagnosticsCallback): Promise<LighthouseMetrics> {
     const MAX_ATTEMPTS = 2;
     let lastError: any = null;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
-        return await this.runSingleAudit(targetUrl, attempt, MAX_ATTEMPTS);
+        return await this.runSingleAudit(targetUrl, attempt, MAX_ATTEMPTS, onDiagnostics);
       } catch (error: any) {
         lastError = error;
-        const errMessage = error?.message || 'Unknown Lighthouse error';
+        const errMessage = sanitizeDiagnosticMessage(error?.message || 'Unknown Lighthouse error');
         console.error(`[Lighthouse] Attempt ${attempt}/${MAX_ATTEMPTS} failed: ${errMessage}`);
 
         if (attempt < MAX_ATTEMPTS) {

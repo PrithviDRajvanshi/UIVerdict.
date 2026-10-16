@@ -1,13 +1,7 @@
 import analysisMock from '../data/analysis.json';
 import { AnalysisOverviewData } from '../types/analysis';
-import { ReportData } from '../types/report';
 import { API_URL } from '../config/api.config';
 
-
-export interface BackendScreenshot {
-  filename: string;
-  path: string;
-}
 
 export interface BackendMetrics {
   performance: number;
@@ -18,7 +12,7 @@ export interface BackendMetrics {
   largestContentfulPaint: string;
   speedIndex: string;
   totalBlockingTime: string;
-  cumulativeLayoutShift: number;
+  cumulativeLayoutShift: string;
   timeToInteractive: string;
 }
 
@@ -33,11 +27,11 @@ export interface BackendAiAnalysis {
 }
 
 export interface BackendAnalysisData {
-  id?: string;
+  id: string;
   url: string;
-  screenshot: BackendScreenshot;
   metrics: BackendMetrics;
-  aiAnalysis: BackendAiAnalysis;
+  aiAnalysis: BackendAiAnalysis | null;
+  aiStatus: 'AVAILABLE' | 'UNAVAILABLE';
 }
 
 export interface BackendAnalysisResponse {
@@ -107,40 +101,9 @@ export async function analyzeWebsite(url: string, signal?: AbortSignal): Promise
 
   const result: BackendAnalysisResponse = await response.json();
 
-  if (!result || !result.data || !result.data.metrics || !result.data.aiAnalysis) {
+  if (!result || !result.data || !result.data.id) {
     throw new Error('Received an unexpected response from the server.');
   }
 
   return result.data;
-}
-
-export function mapBackendToReportData(data: BackendAnalysisData, id?: string): ReportData {
-  const reportId = data.id || id || `UV-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
-  const timestamp = new Date().toISOString();
-
-  return {
-    evaluationId: reportId,
-    algorithm: 'v4.2.1-STABLE // FORENSIC SCAN COMPLETE',
-    timestamp,
-    latency: '45ms',
-    overallScore: data.aiAnalysis.overallVerdict?.score ?? 0,
-    verdictStatus: data.aiAnalysis.overallVerdict?.label || 'Satisfactory',
-    metrics: {
-      performance: data.metrics.performance,
-      accessibility: data.metrics.accessibility,
-      bestPractices: data.metrics.bestPractices,
-      seoStructure: data.metrics.seo,
-      firstContentfulPaint: data.metrics.firstContentfulPaint,
-      largestContentfulPaint: data.metrics.largestContentfulPaint,
-      speedIndex: data.metrics.speedIndex,
-      totalBlockingTime: data.metrics.totalBlockingTime,
-      cumulativeLayoutShift: data.metrics.cumulativeLayoutShift,
-      timeToInteractive: data.metrics.timeToInteractive,
-    },
-    qualitativeCritique: data.aiAnalysis.qualitativeCritique || [],
-    strengths: data.aiAnalysis.strengths || [],
-    refinements: data.aiAnalysis.areasForRefinement || [],
-    url: data.url,
-    screenshot: data.screenshot,
-  };
 }

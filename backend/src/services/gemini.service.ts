@@ -56,43 +56,33 @@ export class GeminiService {
       throw new ApiError(500, 'Gemini API key is not configured');
     }
     if (!this.ai) {
-      this.ai = new GoogleGenAI({ apiKey: config.geminiApiKey });
+      this.ai = new GoogleGenAI({
+        apiKey: config.geminiApiKey,
+        httpOptions: {
+          timeout: config.geminiTimeoutMs,
+        },
+      });
     }
     return this.ai;
   }
 
+  protected async sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private statusOf(error: any): number {
+    return Number(error?.status || error?.statusCode || error?.response?.status || 0);
+  }
+
   private isTransientError(error: any): boolean {
-    if (!error) return false;
-    const msg = String(error?.message || error?.status || error).toLowerCase();
-    const statusCode = error?.statusCode || error?.status;
+    return [429, 500, 502, 503, 504].includes(this.statusOf(error)) ||
+      error?.name === 'AbortError' || error?.code === 'ETIMEDOUT' ||
+      /timeout|timed out|deadline_exceeded|socket hang up|fetch failed|network error/i.test(String(error?.message || ''));
+  }
 
-    // Never retry on missing files, bad paths, or client errors
-    if (msg.includes('screenshot') || msg.includes('file not found') || msg.includes('path traversal') || statusCode === 400) {
-      return false;
-    }
-
-    if (statusCode === 429 || statusCode === 500 || statusCode === 502 || statusCode === 503 || statusCode === 504) {
-      return true;
-    }
-
-    if (
-      msg.includes('429') ||
-      msg.includes('500') ||
-      msg.includes('502') ||
-      msg.includes('503') ||
-      msg.includes('504') ||
-      msg.includes('unavailable') ||
-      msg.includes('resource_exhausted') ||
-      msg.includes('high demand') ||
-      msg.includes('rate limit') ||
-      msg.includes('quota') ||
-      msg.includes('timeout') ||
-      msg.includes('overloaded')
-    ) {
-      return true;
-    }
-
-    return false;
+  private sanitizedError(error: any): string {
+    return String(error?.message || 'Unknown error').replace(/AIza[\w-]{20,}/g, '[redacted]')
+      .replace(/https?:\/\/\S+/g, '[url]').replace(/\s+/g, ' ').slice(0, 240);
   }
 
   private loadScreenshotPart(screenshot: ScreenshotResult): { inlineData: { mimeType: string; data: string } } {
@@ -147,8 +137,14 @@ export class GeminiService {
     };
   }
 
-  private async generateSingleAttempt(input: GeminiInputData, attempt: number, maxAttempts: number): Promise<AiAnalysis> {
-    console.log(`[Gemini] Attempt ${attempt}/${maxAttempts}: Starting multimodal AI analysis for URL: ${input.url}`);
+  private async generateSingleAttempt(
+    input: GeminiInputData,
+    model: string,
+    attempt: number,
+    maxAttempts: number,
+    timeoutMs: number
+  ): Promise<AiAnalysis> {
+    const startedAt = Date.now();
 
     const client = this.getClient();
     const userPrompt = generateUserPrompt(input);
@@ -159,16 +155,34 @@ export class GeminiService {
       screenshotPart,
     ];
 
+    const abortController = new AbortController();
+    let timer: NodeJS.Timeout | null = null;
+    let didTimeout = false;
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        didTimeout = true;
+        abortController.abort();
+        reject(new Error(`[Gemini] Request timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+
     try {
-      const response = await client.models.generateContent({
-        model: config.geminiModel,
+      const apiPromise = client.models.generateContent({
+        model,
         contents,
         config: {
           responseMimeType: 'application/json',
           responseSchema: responseSchema,
           systemInstruction: UI_VERDICT_SYSTEM_PROMPT,
+          abortSignal: abortController.signal,
+          httpOptions: {
+            timeout: timeoutMs,
+          },
         },
       });
+
+      const response = await Promise.race([apiPromise, timeoutPromise]);
 
       const responseText = response.text;
       if (!responseText) {
@@ -199,70 +213,80 @@ export class GeminiService {
       aiResult.overallVerdict.score = normalizedScore;
       aiResult.overallVerdict.label = resolveVerdictLabel(normalizedScore, aiResult.overallVerdict.label);
 
-      console.log(`[Gemini] Attempt ${attempt}/${maxAttempts}: Completed successfully for URL: ${input.url}`);
+      console.info(`[Gemini] model=${model} attempt=${attempt}/${maxAttempts} elapsed_ms=${Date.now() - startedAt} status=200 result=success`);
       return aiResult;
     } catch (error: any) {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+
       if (error instanceof ApiError) {
+        console.error(`[Gemini] model=${model} attempt=${attempt}/${maxAttempts} elapsed_ms=${Date.now() - startedAt} status=${error.statusCode} error=${this.sanitizedError(error)}`);
         throw error;
       }
 
-      const errorMessage = error?.message || 'Unknown error';
-      console.error(`[Gemini] Attempt ${attempt}/${maxAttempts} failed: ${errorMessage}`);
+      const isTimeout =
+        didTimeout ||
+        abortController.signal.aborted ||
+        error?.name === 'AbortError' ||
+        String(error?.message || '').toLowerCase().includes('timed out') ||
+        String(error?.message || '').toLowerCase().includes('timeout');
 
-      if (
-        errorMessage.includes('API key') ||
-        errorMessage.includes('API_KEY') ||
-        errorMessage.includes('401') ||
-        errorMessage.includes('403')
-      ) {
-        throw new ApiError(500, 'Gemini API authentication failure');
-      }
-      if (
-        errorMessage.includes('429') ||
-        errorMessage.includes('quota') ||
-        errorMessage.includes('Rate limit')
-      ) {
-        throw new ApiError(429, 'Gemini API rate limit exceeded');
-      }
-      if (
-        errorMessage.includes('timeout') ||
-        errorMessage.includes('503') ||
-        errorMessage.includes('UNAVAILABLE') ||
-        errorMessage.includes('high demand')
-      ) {
-        throw new ApiError(503, 'Gemini AI service is currently unavailable');
+      if (isTimeout) {
+        console.error(`[Gemini] Request timed out after ${timeoutMs}ms`);
+        const timeoutError: any = new ApiError(503, `Gemini request timed out after ${timeoutMs}ms`);
+        timeoutError.transient = true;
+        throw timeoutError;
       }
 
-      throw new ApiError(500, 'Failed to generate AI analysis');
+      const status = this.statusOf(error);
+      const message = this.sanitizedError(error);
+      console.error(`[Gemini] model=${model} attempt=${attempt}/${maxAttempts} elapsed_ms=${Date.now() - startedAt} status=${status || 'n/a'} error=${message}`);
+      if (status === 401 || status === 403 || /api[_ ]key|permission_denied|unauthorized|forbidden/i.test(message)) {
+        throw new ApiError(502, 'Gemini authentication or permission failure');
+      }
+      if (status === 404 || /unsupported model|invalid model|model .*not found/i.test(message)) {
+        throw new ApiError(502, 'Configured Gemini model is unsupported');
+      }
+      if (status === 400) throw new ApiError(502, 'Gemini rejected the analysis request');
+      const retryable = this.isTransientError(error);
+      const wrapped: any = new ApiError(status || 503, retryable ? 'Gemini is temporarily unavailable' : 'Gemini analysis request failed');
+      wrapped.transient = retryable;
+      throw wrapped;
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
     }
   }
 
   public async generateAnalysis(input: GeminiInputData): Promise<AiAnalysis> {
-    const MAX_ATTEMPTS = 3;
-    let lastError: any = null;
-
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      try {
-        return await this.generateSingleAttempt(input, attempt, MAX_ATTEMPTS);
-      } catch (error: any) {
-        lastError = error;
-        const isTransient = this.isTransientError(error);
-
-        if (!isTransient || attempt === MAX_ATTEMPTS) {
-          console.error(`[Gemini] Attempt ${attempt}/${MAX_ATTEMPTS} failed permanently or reached max attempts.`);
-          break;
+    const models = [...new Set([config.geminiModel, config.geminiFallbackModel, config.geminiLastFallbackModel].filter(Boolean))];
+    const deadline = Date.now() + config.geminiDeadlineMs;
+    let lastError: any;
+    for (const model of models) {
+      for (let attempt = 1; attempt <= config.geminiMaxAttempts; attempt++) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        try {
+          return await this.generateSingleAttempt(input, model, attempt, config.geminiMaxAttempts, Math.min(config.geminiTimeoutMs, remaining));
+        } catch (error: any) {
+          lastError = error;
+          const transient = Boolean(error?.transient) || (!(error instanceof ApiError) && this.isTransientError(error));
+          if (!transient) throw error;
+          if (attempt < config.geminiMaxAttempts && Date.now() < deadline) {
+            const capMs = Math.min(500, 150 * 2 ** (attempt - 1));
+            const delayMs = Math.floor(Math.random() * capMs);
+            if (delayMs < deadline - Date.now()) await this.sleep(delayMs);
+          }
+          if ([503, 504].includes(this.statusOf(error)) || /timeout|deadline/i.test(error.message || '')) break;
         }
-
-        const backoffMs = attempt * 2000;
-        console.warn(`[Gemini] Attempt ${attempt}/${MAX_ATTEMPTS} failed with transient error (${error?.message || error}). Retrying in ${backoffMs}ms...`);
-        await new Promise((resolve) => setTimeout(resolve, backoffMs));
       }
+      if (Date.now() >= deadline) break;
     }
-
-    if (lastError instanceof ApiError) {
-      throw lastError;
-    }
-    throw new ApiError(503, `Gemini AI service is currently unavailable: ${lastError?.message || 'Unknown failure'}`);
+    throw new ApiError(503, `AI feedback is unavailable: ${lastError?.message || 'Gemini deadline exceeded'}`);
   }
 }
 

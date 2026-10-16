@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { ReportMetrics } from '../../types/report';
 
 interface ScorePanelProps {
-  overallScore: number;
+  overallScore: number | null;
   verdictStatus: string;
   metrics: ReportMetrics;
   isAuthenticated?: boolean;
@@ -33,7 +33,7 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-6">
             <div className="text-[84px] font-bold leading-none tracking-tighter text-primary">
-              {overallScore}
+              {overallScore ?? '—'}
             </div>
             <div className="flex flex-col">
               <span className="font-label-sm text-label-sm text-[#888888] uppercase">Verdict</span>
@@ -43,7 +43,7 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
             </div>
           </div>
           <p className="font-mono-data text-[11px] text-[#888888] tracking-wide mt-1">
-            AI-powered holistic UX/UI evaluation
+            {overallScore === null ? 'AI evaluation unavailable; score not generated' : 'AI-powered holistic UX/UI evaluation'}
           </p>
         </div>
         <hr className="border-[#2a2a2a] border-t-1" />

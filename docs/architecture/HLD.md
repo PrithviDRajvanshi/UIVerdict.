@@ -1,62 +1,52 @@
-# UIVerdict — High-Level Design (HLD)
+# High-Level Architecture Design (HLD)
 
-## Document Overview
-This document specifies the High-Level Design (HLD) for **UIVerdict**, an automated UI/UX website quality evaluation platform. It details system objectives, high-level architecture, component responsibilities, end-to-end request workflows, data storage strategies, security models, and system resiliency.
+## 1. System Overview
 
----
-
-## 1. Purpose
-
-The objective of UIVerdict is to provide developers, UI/UX designers, and product owners with an automated, objective, and qualitative audit of any target website URL within ~60 seconds.
-
-By combining empirical performance telemetry (Lighthouse) and visual rendering evidence (Playwright) with AI qualitative reasoning (Google Gemini), UIVerdict eliminates subjective bias and manual overhead in web design evaluations.
+**UIVerdict** is an automated website UI/UX evaluation platform designed to perform automated audits on target web applications. Within a 60-second execution lifecycle, the platform captures high-resolution full-page screenshots, audits performance and accessibility metrics, computes an evidence-based global score, and uses Google Gemini AI to produce qualitative UI/UX critiques and recommendations.
 
 ---
 
-## 2. System Goals
+## 2. Business Goals & Objectives
 
-- **Automated Multi-Stage Audit**: Execute screenshot capture, Core Web Vitals auditing, and qualitative design evaluation from a single URL submission.
-- **Sub-60s Execution SLA**: Complete the entire end-to-end analysis pipeline in under 60 seconds.
-- **Deterministic & Objective Scoring**: Anchor global UI/UX scores directly to empirical performance and accessibility data.
-- **Structured AI Insights**: Produce clean, schema-validated JSON qualitative critiques, strengths, and recommendations without relying on unpredictable free-text parsing.
-- **Hybrid Data Persistence**: Maintain relational data integrity for user histories and project metadata while storing rich unstructured evaluation snapshots.
-- **Strict Data Isolation**: Guarantee that user evaluation logs and archive entries remain private and accessible only to authenticated owners.
+- **Automated UI/UX Assessment**: Eliminate subjective and slow design reviews by providing deterministic performance metrics and AI qualitative feedback.
+- **Unified Forensic Dashboard**: Present raw performance indicators (Core Web Vitals) alongside high-level design critiques in a single interactive dashboard.
+- **Authenticated Historical Auditing**: Allow users to track UI/UX quality across multiple domains, historical releases, and redesign cycles.
 
 ---
 
-## 3. System Overview
-
-UIVerdict operates as a decoupled client-server web application comprising a modern Single-Page Application (SPA) frontend, an Express-based REST API gateway, an automated analysis orchestration engine, and a dual-database storage backend.
+## 3. High-Level System Architecture
 
 ```
-+-----------------------------------------------------------------------+
-|                           CLIENT LAYER                                |
-|                 React SPA (Vite + Tailwind CSS)                       |
-+-----------------------------------------------------------------------+
-                                   |
-                               HTTP / REST
-                                   |
-+-----------------------------------------------------------------------+
-|                         BACKEND API GATEWAY                           |
-|            Node.js / Express (TypeScript) + Middleware                |
-+-----------------------------------------------------------------------+
-                                   |
-         +-------------------------+-------------------------+
-         |                         |                         |
++-------------------------------------------------------------------------------+
+|                                CLIENT LAYER                                   |
+|                        React 18 Single-Page App (SPA)                         |
+|                    Vite + Tailwind CSS + React Router v6                      |
++-------------------------------------------------------------------------------+
+                                        |  HTTP REST / Cookie Auth
+                                        v
++-------------------------------------------------------------------------------+
+|                              APPLICATION LAYER                                |
+|                        Node.js + Express API Gateway                          |
+|                   Middleware: Helmet, CORS, JWT Auth, Zod                     |
++-------------------------------------------------------------------------------+
+                                        |
+                 +----------------------+----------------------+
+                 |                      |                      |
+                 v                      v                      v
 +------------------+     +-------------------+     +--------------------+
-| BROWSER ENGINE   |     | AUDIT ENGINE      |     | QUALITATIVE AI     |
-| Playwright       |     | Lighthouse        |     | Gemini 3.6 Flash   |
-| (Headless Chrome)|     | (Chrome Launcher) |     | (Google GenAI SDK) |
+| AUTOMATION       |     | AUDIT ENGINE      |     | COGNITIVE AI       |
+| Playwright       |     | Lighthouse        |     | Google Gemini AI   |
+| Headless Chrome  |     | Core Web Vitals   |     | GenAI Multimodal   |
 +------------------+     +-------------------+     +--------------------+
          |                         |                         |
          +-------------------------+-------------------------+
                                    |
                      +-------------+-------------+
                      |                           |
-         +-----------------------+   +-----------------------+
-         | RELATIONAL STORE      |   | SNAPSHOT STORE        |
-         | PostgreSQL + Prisma   |   | MongoDB + Mongoose    |
-         +-----------------------+   +-----------------------+
+         +-----------------------------------------------+
+         | SINGLE SOURCE OF TRUTH PERSISTENCE LAYER      |
+         | PostgreSQL + Prisma ORM                       |
+         +-----------------------------------------------+
 ```
 
 ---
@@ -94,8 +84,6 @@ graph TB
     subgraph Storage Layer
         Postgres[(PostgreSQL Relational DB)]
         PrismaORM[Prisma ORM Client]
-        MongoDB[(MongoDB Snapshot Store)]
-        MongooseODM[Mongoose ODM Client]
     end
 
     SPA -->|POST /api/v1/analyze| Express
@@ -113,10 +101,7 @@ graph TB
     AIService --> GeminiAPI
 
     Orchestrator --> PrismaORM
-    Orchestrator --> MongooseODM
-
     PrismaORM --> Postgres
-    MongooseODM --> MongoDB
 ```
 
 ---
@@ -132,7 +117,7 @@ graph TB
 - **Role**: Manages HTTP routing (`/api/v1/*`), handles security headers (Helmet), manages CORS policies, parses cookies, and handles centralized exception formatting (`ApiError`).
 
 ### 5.3 Analysis Orchestration Engine (`AnalysisService`)
-- **Role**: Coordinates the 7-phase analysis lifecycle. It creates PostgreSQL records, triggers screenshot capture, executes Lighthouse audits, calls Gemini AI, saves MongoDB document snapshots, and updates analysis statuses.
+- **Role**: Coordinates the analysis lifecycle. It creates PostgreSQL records, triggers screenshot capture, executes Lighthouse audits, calls Gemini AI, saves complete results directly to PostgreSQL, and updates analysis statuses.
 
 ### 5.4 Browser Automation Engine (`PlaywrightService`)
 - **Technology**: Playwright (Chromium).
@@ -146,13 +131,9 @@ graph TB
 - **Technology**: `@google/genai` (`gemini-3.6-flash`).
 - **Role**: Transmits audit evidence to Gemini AI with strict JSON Schemas, generating structured qualitative critiques, strengths, and areas for refinement.
 
-### 5.7 Relational Storage Layer
+### 5.7 Persistence Layer
 - **Technology**: PostgreSQL, Prisma ORM.
-- **Role**: Stores relational entity metadata (`User`, `Project`, `Analysis`), enforcing foreign key constraints, user ownership, and status tracking.
-
-### 5.8 Snapshot Document Store
-- **Technology**: MongoDB, Mongoose ODM.
-- **Role**: Stores complete, schema-flexible audit documents (`AnalysisSnapshot`) containing full metrics, screenshot metadata, and AI qualitative outputs.
+- **Role**: Single source of truth storing relational entities (`User`, `Project`, `Analysis`), scalar metrics (Lighthouse scores, Web Vitals, overall UIVerdict score), and JSON structures for qualitative AI feedback.
 
 ---
 
@@ -169,7 +150,6 @@ sequenceDiagram
     participant PW as Playwright
     participant LH as Lighthouse
     participant AI as Gemini AI
-    participant Mongo as MongoDB (Mongoose)
 
     User->>Client: Input URL & Click ANALYZE
     Client->>API: POST /api/v1/analyze { url }
@@ -199,10 +179,9 @@ sequenceDiagram
     end
 
     rect rgb(25, 35, 35)
-        note right of Orchestrator: Phase 5: Snapshot Persistence
-        Orchestrator->>Mongo: saveSnapshot(analysisId, metrics, aiAnalysis, screenshot)
-        Mongo-->>Orchestrator: Return mongoSnapshot._id
-        Orchestrator->>PG: updateAnalysisStatus(analysisId, COMPLETED, mongoDocumentId)
+        note right of Orchestrator: Phase 5: Complete PostgreSQL Persistence
+        Orchestrator->>PG: saveAnalysisResult(metrics, aiAnalysis, status: COMPLETED)
+        PG-->>Orchestrator: Return updated Analysis record
     end
 
     Orchestrator-->>API: Return AnalysisResponse JSON Payload
@@ -213,21 +192,17 @@ sequenceDiagram
 
 ---
 
-## 7. Data Architecture (Dual-Database Pattern)
+## 7. Data Architecture (PostgreSQL Single Source of Truth)
 
-UIVerdict implements a hybrid storage architecture:
+UIVerdict uses PostgreSQL + Prisma as the single persistence layer:
 
-### 7.1 PostgreSQL (Relational Metadata Store)
-- **Use Case**: Core relational entities requiring strict constraints, transactional safety, and index-accelerated query filters.
-- **Key Entities**:
-  - `User`: Authenticated user accounts (`id`, `email`, `passwordHash`).
-  - `Project`: Organizational grouping for analyses (`id`, `userId`, `name`).
-  - `Analysis`: Audit tracking records (`id`, `projectId`, `userId`, `url`, `status`, `mongoDocumentId`).
-
-### 7.2 MongoDB (Document Snapshot Store)
-- **Use Case**: High-volume, semi-structured evaluation payloads that contain complex nested objects (e.g., qualitative critique arrays, timing metrics, and screenshot metadata).
-- **Key Document**:
-  - `AnalysisSnapshot`: Unstructured document keyed by `analysisId`, preserving the exact JSON state produced by Lighthouse and Gemini AI.
+### Key Entities:
+- `User`: Authenticated user accounts (`id`, `name`, `email`, `passwordHash`, `createdAt`, `updatedAt`).
+- `Project`: Organizational grouping for analyses (`id`, `userId`, `name`, `createdAt`, `updatedAt`).
+- `Analysis`: Comprehensive audit records:
+  - Relational scalar columns: `id`, `projectId`, `userId`, `url`, `status`, `overallScore`, `verdictLabel`, Lighthouse scores, and Web Vitals.
+  - JSON columns: `qualitativeCritique`, `strengths`, and `areasForRefinement`.
+- **Temporary screenshot evidence**: A screenshot exists on local disk only for the active analysis and is removed after the pipeline completes or fails.
 
 ---
 
@@ -248,7 +223,7 @@ UIVerdict implements a hybrid storage architecture:
 - **Lighthouse Retry Policy**: Performs up to 2 attempts for Lighthouse Chrome process execution to withstand temporary port binding or FCP timeouts.
 - **Gemini Exponential Backoff**: Detects transient errors (429, 503, rate limits) and retries up to 3 times with exponential backoff delays ($2s, 4s, 6s$).
 - **Server Timeout Extensions**: Express server socket timeouts (`timeout`, `requestTimeout`, `headersTimeout`) are set to **300,000 ms (5 minutes)** to support long-running analysis workflows.
-- **Transaction Rollback & Status Recovery**: If any step in the analysis pipeline throws an unhandled exception, the analysis status in PostgreSQL is updated to `FAILED`.
+- **Status Recovery**: If any step in the analysis pipeline throws an unhandled exception, the analysis status in PostgreSQL is updated to `FAILED`.
 
 ---
 
@@ -266,10 +241,10 @@ The current version executes website analyses synchronously in-flight within Exp
 
 ## 11. Security Considerations
 
-- **Secret Protection**: Secrets (`GEMINI_API_KEY`, `DATABASE_URL`, `MONGODB_URI`, `JWT_SECRET`) are managed strictly through environment variables and excluded from version control via `.gitignore`.
+- **Secret Protection**: Secrets (`GEMINI_API_KEY`, `DATABASE_URL`, `JWT_SECRET`) are managed strictly through environment variables and excluded from version control via `.gitignore`.
 - **CORS Protection**: Restricted to explicitly whitelisted origin domains (`FRONTEND_URL`).
 - **HTTP Header Hardening**: Enforced via `helmet()` to guard against clickjacking, MIME sniffing, and cross-site scripting (XSS).
-- **Injection Defense**: PostgreSQL inputs parameterized by Prisma ORM; MongoDB inputs validated through Mongoose schemas; incoming HTTP bodies sanitized via Zod validation.
+- **Injection Defense**: PostgreSQL inputs parameterized by Prisma ORM; incoming HTTP bodies sanitized via Zod validation.
 
 ---
 

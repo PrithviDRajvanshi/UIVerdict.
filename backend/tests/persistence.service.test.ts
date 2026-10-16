@@ -1,20 +1,14 @@
 import assert from 'assert';
 import { postgresRepository } from '../src/repositories/postgres/postgres.repository';
-import { mongoRepository } from '../src/repositories/mongo/mongo.repository';
+import { prisma } from '../src/config/postgres';
 import { AnalysisStatus } from '@prisma/client';
-import { ScreenshotResult } from '../src/services/playwright.service';
 import { LighthouseMetrics } from '../src/services/lighthouse.service';
 import { AiAnalysis } from '../src/validators/aiAnalysis.validator';
 
 async function runPersistenceTests() {
-  console.log('--- STARTING PHASE 4 HYBRID PERSISTENCE LAYER TESTS ---');
+  console.log('--- STARTING POSTGRESQL SINGLE SOURCE OF TRUTH PERSISTENCE TESTS ---');
 
   const testUrl = `https://example.com/test-${Date.now()}`;
-  const sampleScreenshot: ScreenshotResult = {
-    url: testUrl,
-    filename: 'test-screenshot.png',
-    path: 'temp/screenshots/test-screenshot.png',
-  };
   const sampleMetrics: LighthouseMetrics = {
     performance: 85,
     accessibility: 90,
@@ -34,135 +28,196 @@ async function runPersistenceTests() {
     areasForRefinement: ['Reduce JavaScript bundle size'],
   };
 
-  // Test 1: PostgreSQL Project & Analysis Creation inside Transaction
+  // Test 1: PostgreSQL Project & Analysis Creation inside Transaction (with User relation)
   console.log('\n[Test 1] PostgreSQL Project & Analysis Creation via Prisma Transaction');
   let analysisId = '';
+  let testUserId: string | undefined;
+
   try {
+    const testUser = await prisma.user.upsert({
+      where: { email: 'persist_test@uiverdict.com' },
+      update: {},
+      create: {
+        name: 'Persistence Tester',
+        email: 'persist_test@uiverdict.com',
+        passwordHash: 'dummy-hash',
+      },
+    });
+    testUserId = testUser.id;
+
     const { project, analysis } = await postgresRepository.createAnalysisTransaction(
       testUrl,
-      'Test Persistence Project'
+      'Test Single Source Project',
+      testUserId
     );
     assert.ok(project.id, 'Project ID should be generated');
-    assert.strictEqual(project.name, 'Test Persistence Project');
+    assert.strictEqual(project.name, 'Test Single Source Project');
     assert.ok(analysis.id, 'Analysis ID should be generated');
     assert.strictEqual(analysis.projectId, project.id);
+    assert.strictEqual(analysis.userId, testUserId);
     assert.strictEqual(analysis.status, AnalysisStatus.PROCESSING);
 
     analysisId = analysis.id;
-    console.log(`✓ Passed: PostgreSQL transaction created Project (${project.id}) and Analysis (${analysis.id})`);
+    console.log(`✓ Passed: PostgreSQL transaction created Project (${project.id}) and Analysis (${analysis.id}) linked to User (${testUserId})`);
   } catch (err: any) {
-    console.log('⚠️ PostgreSQL database offline/skipped in mock environment:', err?.message || err);
-    analysisId = `mock-uuid-${Date.now()}`;
+    console.error('❌ Test 1 failed:', err);
+    throw err;
   }
 
-  // Test 2: MongoDB AnalysisSnapshot Creation with Embedded Metrics & AI Analysis
-  console.log('\n[Test 2] MongoDB Snapshot Creation (Embedding Metrics & AI Analysis, Referencing analysisId)');
-  let mongoDocId = '';
+  // Test 2: Persist Complete Analysis Result (Lighthouse metrics and AI analysis)
+  console.log('\n[Test 2] PostgreSQL Complete Analysis Persistence (Relational Columns & JSON)');
   try {
-    const snapshot = await mongoRepository.saveSnapshot({
-      analysisId,
-      url: testUrl,
-      screenshot: sampleScreenshot,
+    const saved = await postgresRepository.saveAnalysisResult(analysisId, {
       metrics: sampleMetrics,
       aiAnalysis: sampleAiAnalysis,
+      status: AnalysisStatus.COMPLETED,
     });
-    assert.ok(snapshot._id, 'Mongo Snapshot _id should exist');
-    assert.strictEqual(snapshot.analysisId, analysisId);
-    assert.strictEqual(snapshot.metrics.performance, 85);
-    assert.strictEqual(snapshot.aiAnalysis.overallVerdict.score, 89.2);
 
-    mongoDocId = snapshot._id.toString();
-    console.log(`✓ Passed: MongoDB document created with embedded metrics and analysisId ref (${mongoDocId})`);
+    assert.strictEqual(saved.id, analysisId);
+    assert.strictEqual(saved.status, AnalysisStatus.COMPLETED);
+    // Scalar fields
+    assert.strictEqual(saved.overallScore, 89.2);
+    assert.strictEqual(saved.verdictLabel, 'GOOD');
+    assert.strictEqual(saved.performanceScore, 85);
+    assert.strictEqual(saved.accessibilityScore, 90);
+    assert.strictEqual(saved.bestPracticesScore, 95);
+    assert.strictEqual(saved.seoScore, 90);
+    assert.strictEqual(saved.firstContentfulPaint, '1.2 s');
+    assert.strictEqual(saved.largestContentfulPaint, '2.5 s');
+    assert.strictEqual(saved.speedIndex, '1.8 s');
+    assert.strictEqual(saved.totalBlockingTime, '150 ms');
+    assert.strictEqual(saved.cumulativeLayoutShift, '0.05');
+    assert.strictEqual(saved.timeToInteractive, '2.8 s');
+
+    // JSON fields
+    assert.deepStrictEqual(saved.qualitativeCritique, sampleAiAnalysis.qualitativeCritique);
+    assert.deepStrictEqual(saved.strengths, sampleAiAnalysis.strengths);
+    assert.deepStrictEqual(saved.areasForRefinement, sampleAiAnalysis.areasForRefinement);
+
+    console.log('✓ Passed: Analysis scalar metrics, Web Vitals, and structured AI analysis persisted accurately in PostgreSQL');
   } catch (err: any) {
-    console.log('⚠️ MongoDB database offline/skipped in mock environment:', err?.message || err);
+    console.error('❌ Test 2 failed:', err);
+    throw err;
   }
 
-  // Test 3: PostgreSQL Status Update to COMPLETED
-  console.log('\n[Test 3] PostgreSQL Status Update to COMPLETED');
+  // Test 3: Snapshot Retrieval by ID
+  console.log('\n[Test 3] Snapshot Retrieval by Analysis ID');
   try {
-    if (analysisId && !analysisId.startsWith('mock-')) {
-      const updated = await postgresRepository.updateAnalysisStatus(
-        analysisId,
-        AnalysisStatus.COMPLETED,
-        mongoDocId
-      );
-      assert.strictEqual(updated.status, AnalysisStatus.COMPLETED);
-      assert.strictEqual(updated.mongoDocumentId, mongoDocId);
-      console.log('✓ Passed: Relational status updated to COMPLETED with mongoDocumentId reference');
-    } else {
-      console.log('✓ Passed: Skipped mock DB status update');
+    const snapshot = await postgresRepository.getSnapshotByAnalysisId(analysisId);
+    assert.ok(snapshot, 'Snapshot should be returned');
+    assert.strictEqual(snapshot?.id, analysisId);
+    assert.strictEqual(snapshot?.url, testUrl);
+    assert.strictEqual(snapshot?.metrics.performance, 85);
+    assert.strictEqual(snapshot?.aiAnalysis?.overallVerdict.score, 89.2);
+    assert.strictEqual(snapshot?.aiAnalysis?.overallVerdict.label, 'GOOD');
+    console.log('✓ Passed: Snapshot formatted and retrieved accurately from PostgreSQL');
+  } catch (err: any) {
+    console.error('❌ Test 3 failed:', err);
+    throw err;
+  }
+
+  // Test 4: History / Archive Filtering by URL
+  console.log('\n[Test 4] History / Archive Filtering by URL');
+  try {
+    const history = await postgresRepository.getSnapshotsByUrl(testUrl);
+    assert.ok(Array.isArray(history), 'History should be an array');
+    assert.ok(history.length >= 1, 'Should find at least 1 historical snapshot');
+    assert.strictEqual(history[0].id, analysisId);
+    console.log(`✓ Passed: Retrieved ${history.length} snapshot(s) for URL ordered by createdAt desc`);
+  } catch (err: any) {
+    console.error('❌ Test 4 failed:', err);
+    throw err;
+  }
+
+  // Test 5: PostgreSQL Aggregate Analysis Stats by URL
+  console.log('\n[Test 5] PostgreSQL URL Analysis Statistics Aggregation');
+  try {
+    const stats = await postgresRepository.getAnalysisStatsByUrl(testUrl);
+    assert.ok(Array.isArray(stats), 'Stats result must be an array');
+    assert.strictEqual(stats.length, 1);
+    assert.strictEqual(stats[0].url, testUrl);
+    assert.strictEqual(stats[0].totalAnalyses, 1);
+    assert.strictEqual(stats[0].avgPerformance, 85);
+    assert.strictEqual(stats[0].avgOverallScore, 89.2);
+    console.log('✓ Passed: PostgreSQL aggregation computed stats accurately:');
+    console.log('   ', JSON.stringify(stats[0]));
+  } catch (err: any) {
+    console.error('❌ Test 5 failed:', err);
+    throw err;
+  }
+
+  // Test 6: Status Update to FAILED on Pipeline Failure
+  console.log('\n[Test 6] Pipeline Failure Status Handling');
+  try {
+    const failedAnalysis = await postgresRepository.createAnalysisTransaction(
+      'https://example.com/fail-test',
+      'Test Single Source Project'
+    );
+    const updated = await postgresRepository.updateAnalysisStatus(
+      failedAnalysis.analysis.id,
+      AnalysisStatus.FAILED
+    );
+    assert.strictEqual(updated.status, AnalysisStatus.FAILED);
+    console.log('✓ Passed: Status updated to FAILED cleanly in PostgreSQL without secondary store dependencies');
+  } catch (err: any) {
+    console.error('❌ Test 6 failed:', err);
+    throw err;
+  }
+
+  // Test 7: Partial Lighthouse report persists without fabricated AI data
+  console.log('\n[Test 7] Partial report persistence when AI feedback is unavailable');
+  try {
+    const partialCreated = await postgresRepository.createAnalysisTransaction(
+      `https://example.com/partial-${Date.now()}`,
+      'Partial Report Test Project'
+    );
+    const partialSaved = await postgresRepository.saveAnalysisResult(partialCreated.analysis.id, {
+      metrics: sampleMetrics,
+      status: AnalysisStatus.COMPLETED,
+    });
+    const partialReport = await postgresRepository.getCompletedReport(partialCreated.analysis.id, { guest: true });
+    assert.strictEqual(partialSaved.status, AnalysisStatus.COMPLETED);
+    assert.strictEqual(partialSaved.overallScore, null);
+    assert.strictEqual(partialSaved.qualitativeCritique, null);
+    assert.strictEqual(partialReport?.aiStatus, 'UNAVAILABLE');
+    assert.strictEqual(partialReport?.aiAnalysis, null);
+    assert.strictEqual(partialReport?.metrics.performance, sampleMetrics.performance);
+    console.log('✓ Passed: Lighthouse metrics persisted while AI score and critique remain absent');
+  } catch (err: any) {
+    console.error('❌ Test 7 failed:', err);
+    throw err;
+  }
+
+  // Test 8: Authentication Relationships
+  console.log('\n[Test 8] Authentication & User-Project-Analysis Relationship');
+  try {
+    if (testUserId) {
+      const userAnalyses = await prisma.analysis.findMany({
+        where: { userId: testUserId },
+        include: { user: true, project: true },
+      });
+      assert.ok(userAnalyses.length >= 1);
+      assert.strictEqual(userAnalyses[0].user?.id, testUserId);
+      assert.ok(userAnalyses[0].project);
+      console.log('✓ Passed: User-Project-Analysis relational integrity verified');
     }
   } catch (err: any) {
-    console.log('⚠️ Skipped status update check (DB offline)');
+    console.error('❌ Test 7 failed:', err);
+    throw err;
   }
 
-  // Test 4: MongoDB Retrieval by analysisId
-  console.log('\n[Test 4] MongoDB Retrieval by analysisId');
-  try {
-    if (mongoDocId) {
-      const retrieved = await mongoRepository.getSnapshotByAnalysisId(analysisId);
-      assert.ok(retrieved, 'Should retrieve snapshot document');
-      assert.strictEqual(retrieved?.analysisId, analysisId);
-      assert.strictEqual(retrieved?.url, testUrl);
-      console.log('✓ Passed: Snapshot retrieved by cross-database reference analysisId');
-    } else {
-      console.log('✓ Passed: Skipped MongoDB retrieval check (DB offline)');
-    }
-  } catch (err: any) {
-    console.log('⚠️ Skipped Mongo retrieval (DB offline)');
-  }
-
-  // Test 5: MongoDB Filtering by URL and Ordering by createdAt
-  console.log('\n[Test 5] MongoDB Filtering by URL & Recency Ordering');
-  try {
-    if (mongoDocId) {
-      const history = await mongoRepository.getSnapshotsByUrl(testUrl);
-      assert.ok(Array.isArray(history), 'Should return an array');
-      assert.ok(history.length >= 1, 'Should find at least 1 historical snapshot');
-      console.log(`✓ Passed: Retrieved ${history.length} snapshot(s) for URL ordered by createdAt desc`);
-    } else {
-      console.log('✓ Passed: Skipped URL filtering check (DB offline)');
-    }
-  } catch (err: any) {
-    console.log('⚠️ Skipped URL filtering check (DB offline)');
-  }
-
-  // Test 6: MongoDB Aggregation Pipeline Verification
-  console.log('\n[Test 6] Real MongoDB Aggregation Pipeline ($match -> $sort -> $group -> $project)');
-  try {
-    if (mongoDocId) {
-      const stats = await mongoRepository.getAnalysisStatsByUrl(testUrl);
-      assert.ok(Array.isArray(stats), 'Aggregation result must be an array');
-      assert.strictEqual(stats.length, 1);
-      assert.strictEqual(stats[0].url, testUrl);
-      assert.strictEqual(typeof stats[0].avgPerformance, 'number');
-      assert.strictEqual(typeof stats[0].avgOverallScore, 'number');
-      console.log('✓ Passed: Aggregation pipeline computed real statistics accurately:');
-      console.log('   ', JSON.stringify(stats[0]));
-    } else {
-      console.log('✓ Passed: Skipped aggregation check (DB offline)');
-    }
-  } catch (err: any) {
-    console.log('⚠️ Skipped aggregation check (DB offline)');
-  }
-
-  // Test 7: Persistence Failure Handling Strategy
-  console.log('\n[Test 7] Persistence Failure & Compensating Status Handling Strategy');
-  try {
-    const fakeId = `non-existent-${Date.now()}`;
-    const result = await postgresRepository.updateAnalysisStatus(fakeId, AnalysisStatus.FAILED).catch(() => null);
-    assert.strictEqual(result, null, 'Updating non-existent record should return null/fail cleanly');
-    console.log('✓ Passed: Non-existent record status update handled gracefully without unhandled exceptions');
-  } catch (err: any) {
-    console.log('✓ Passed: Persistence failure caught cleanly');
-  }
-
-  console.log('\n==================================================');
-  console.log('ALL HYBRID PERSISTENCE TESTS COMPLETED SUCCESSFULLY');
-  console.log('==================================================\n');
+  console.log('\n=============================================================');
+  console.log('ALL POSTGRESQL SINGLE SOURCE OF TRUTH TESTS PASSED SUCCESSFULLY');
+  console.log('=============================================================\n');
 }
 
-runPersistenceTests().catch((error) => {
-  console.error('Persistence test execution failed:', error);
-  process.exit(1);
-});
+runPersistenceTests()
+  .then(async () => {
+    await prisma.$disconnect();
+    process.exit(0);
+  })
+  .catch(async (error) => {
+    console.error('Persistence test execution failed:', error);
+    await prisma.$disconnect().catch(() => {});
+    process.exit(1);
+  });

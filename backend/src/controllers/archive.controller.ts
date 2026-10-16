@@ -1,8 +1,44 @@
 import { Request, Response, NextFunction } from 'express';
 import { prisma } from '../config/postgres';
-import { mongoRepository } from '../repositories/mongo/mongo.repository';
 import { AnalysisStatus } from '@prisma/client';
 import { ApiError } from '../errors/ApiError';
+import { postgresRepository } from '../repositories/postgres/postgres.repository';
+import jwt from 'jsonwebtoken';
+import { config } from '../config/env';
+
+export const getReportById = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const analysisId = req.params.analysisId;
+    let access: { userId: string } | { guest: true };
+
+    if (req.user) {
+      access = { userId: req.user.id };
+    } else {
+      const token = req.cookies?.[`guest_report_${analysisId}`];
+      if (!token) throw new ApiError(404, 'Report not found.');
+
+      try {
+        const payload = jwt.verify(token, config.jwtSecret) as jwt.JwtPayload & {
+          purpose?: string;
+          analysisId?: string;
+        };
+        if (payload.purpose !== 'guest-report' || payload.analysisId !== analysisId) {
+          throw new Error('Guest report token does not match the requested report');
+        }
+      } catch {
+        throw new ApiError(404, 'Report not found.');
+      }
+      access = { guest: true };
+    }
+
+    const report = await postgresRepository.getCompletedReport(analysisId, access);
+    if (!report) throw new ApiError(404, 'Report not found.');
+
+    res.status(200).json({ status: 'success', data: report });
+  } catch (error) {
+    next(error);
+  }
+};
 
 export const getArchiveAnalyses = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
@@ -47,35 +83,23 @@ export const getArchiveAnalyses = async (req: Request, res: Response, next: Next
       }),
     ]);
 
-    const items = await Promise.all(
-      records.map(async (record) => {
-        let score: number | null = null;
-        try {
-          const snapshot = await mongoRepository.getSnapshotByAnalysisId(record.id);
-          if (snapshot && snapshot.aiAnalysis && snapshot.aiAnalysis.overallVerdict) {
-            score = snapshot.aiAnalysis.overallVerdict.score;
-          }
-        } catch {
-          // Ignore Mongo retrieval errors gracefully
-        }
+    const items = records.map((record) => {
+      let mappedStatus = 'PENDING';
+      if (record.status === AnalysisStatus.COMPLETED) {
+        mappedStatus = 'COMPLETE';
+      } else if (record.status === AnalysisStatus.FAILED) {
+        mappedStatus = 'FAILED';
+      }
 
-        let mappedStatus = 'PENDING';
-        if (record.status === AnalysisStatus.COMPLETED) {
-          mappedStatus = 'COMPLETE';
-        } else if (record.status === AnalysisStatus.FAILED) {
-          mappedStatus = 'FAILED';
-        }
-
-        return {
-          id: record.id,
-          targetUrl: record.url,
-          date: record.createdAt.toISOString().slice(0, 10),
-          score: score !== null ? Math.round(score) : 0,
-          status: mappedStatus,
-          createdAt: record.createdAt,
-        };
-      })
-    );
+      return {
+        id: record.id,
+        targetUrl: record.url,
+        date: record.createdAt.toISOString().slice(0, 10),
+        score: record.overallScore !== null && record.overallScore !== undefined ? Math.round(record.overallScore) : 0,
+        status: mappedStatus,
+        createdAt: record.createdAt,
+      };
+    });
 
     const totalPages = Math.ceil(total / limit) || 1;
 

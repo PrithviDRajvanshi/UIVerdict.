@@ -40,21 +40,51 @@ model Project {
 }
 
 model Analysis {
-  id              String         @id @default(uuid())
-  projectId       String
-  project         Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  userId          String?
-  user            User?          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  url             String
-  status          AnalysisStatus @default(PENDING)
-  mongoDocumentId String?
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
+  id                     String         @id @default(uuid())
+  projectId              String
+  project                Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId                 String?
+  user                   User?          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  url                    String
+  status                 AnalysisStatus @default(PENDING)
+
+  // Overall UIVerdict scoring
+  overallScore           Float?
+  verdictLabel           String?
+
+  // Lighthouse score scalars (0-100)
+  performanceScore       Int?
+  accessibilityScore     Int?
+  bestPracticesScore     Int?
+  seoScore               Int?
+
+  // Core Web Vitals & diagnostic display metrics
+  firstContentfulPaint   String?
+  largestContentfulPaint String?
+  speedIndex             String?
+  totalBlockingTime      String?
+  cumulativeLayoutShift  String?
+  timeToInteractive      String?
+
+  // Variable & structured AI analysis data (stored as JSON)
+  qualitativeCritique    Json?
+  strengths              Json?
+  areasForRefinement     Json?
+
+  // Sanitized per-run capture and audit diagnostics; no page body or browser credentials.
+  playwrightDiagnostics  Json?
+  lighthouseDiagnostics Json?
+  screenshotArtifactName String? @db.VarChar(200)
+  screenshotSha256       String? @db.Char(64)
+
+  createdAt              DateTime       @default(now())
+  updatedAt              DateTime       @updatedAt
 
   @@index([projectId])
   @@index([userId])
   @@index([url])
   @@index([status])
+  @@index([overallScore])
   @@index([createdAt])
   @@map("analyses")
 }

@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { ApiError } from '../errors/ApiError';
+import { config } from '../config/env';
+import { prisma } from '../config/postgres';
 
 export interface JwtPayload {
   id: string;
@@ -16,45 +18,62 @@ declare global {
   }
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || 'uiverdict-secret-jwt-key';
+const JWT_SECRET = config.jwtSecret;
 
-export const authMiddleware = (req: Request, res: Response, next: NextFunction): void => {
+const resolveAuthenticatedUser = async (req: Request): Promise<JwtPayload | null> => {
+  let token = req.cookies?.token;
+  const authorization = req.headers.authorization;
+
+  if (!token && authorization) {
+    if (!authorization.startsWith('Bearer ') || !authorization.slice(7).trim()) {
+      throw new ApiError(401, 'Invalid or expired authentication session.');
+    }
+    token = authorization.slice(7).trim();
+  }
+
+  if (!token) return null;
+
   try {
-    let token = req.cookies?.token;
-
-    if (!token && req.headers.authorization?.startsWith('Bearer ')) {
-      token = req.headers.authorization.split(' ')[1];
+    const decoded = jwt.verify(token, JWT_SECRET) as jwt.JwtPayload & Partial<JwtPayload>;
+    if (typeof decoded.id !== 'string' || !decoded.id) {
+      throw new ApiError(401, 'Invalid or expired authentication session.');
     }
 
-    if (!token) {
-      throw new ApiError(401, 'Unauthorized access. Please log in.');
-    }
+    // Resolve identity from PostgreSQL instead of trusting potentially stale JWT claims.
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.id },
+      select: { id: true, email: true, name: true },
+    });
+    if (!user) throw new ApiError(401, 'Invalid or expired authentication session.');
 
-    const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
-    req.user = decoded;
-    next();
+    return user;
   } catch (error: any) {
     if (error instanceof ApiError) {
-      return next(error);
+      throw error;
     }
-    return next(new ApiError(401, 'Invalid or expired authentication session.'));
+    throw new ApiError(401, 'Invalid or expired authentication session.');
   }
 };
 
-export const optionalAuthMiddleware = (req: Request, res: Response, next: NextFunction): void => {
-  try {
-    let token = req.cookies?.token;
-
-    if (!token && req.headers.authorization?.startsWith('Bearer ')) {
-      token = req.headers.authorization.split(' ')[1];
+const authenticate = (required: boolean) => (req: Request, _res: Response, next: NextFunction): void => {
+  void resolveAuthenticatedUser(req).then((user) => {
+    if (!user && required) {
+      next(new ApiError(401, 'Unauthorized access. Please log in.'));
+      return;
     }
-
-    if (token) {
-      const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
-      req.user = decoded;
+    if (user) req.user = user;
+    next();
+  }).catch((error) => {
+    if (req.cookies?.token && error instanceof ApiError && error.statusCode === 401) {
+      _res.clearCookie('token', {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+      });
     }
-  } catch {
-    // Ignore invalid token in optional auth
-  }
-  next();
+    next(error);
+  });
 };
+
+export const authMiddleware = authenticate(true);
+export const optionalAuthMiddleware = authenticate(false);
