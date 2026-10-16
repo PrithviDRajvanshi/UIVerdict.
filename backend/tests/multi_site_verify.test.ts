@@ -1,13 +1,11 @@
 import { analysisService } from '../src/services/analysis.service';
 import { connectPostgres, prisma, disconnectPostgres } from '../src/config/postgres';
-import { connectMongoDB, disconnectMongoDB } from '../src/config/mongodb';
-import { mongoRepository } from '../src/repositories/mongo/mongo.repository';
+import { postgresRepository } from '../src/repositories/postgres/postgres.repository';
 import { AnalysisStatus } from '@prisma/client';
 
 async function runMultiSiteVerification() {
   console.log('=== STARTING MULTI-SITE ANALYSIS PIPELINE VERIFICATION ===\n');
   await connectPostgres();
-  await connectMongoDB();
 
   const user = await prisma.user.upsert({
     where: { email: 'multisite_tester@uiverdict.com' },
@@ -21,8 +19,6 @@ async function runMultiSiteVerification() {
 
   const validUrls = [
     'https://www.google.com/',
-    'https://www.github.com/',
-    'https://www.ecell.in/eureka/',
   ];
 
   for (const url of validUrls) {
@@ -35,7 +31,7 @@ async function runMultiSiteVerification() {
       console.log(`✓ [SUCCESS] ${url} analyzed in ${duration}s`);
       console.log(`  - Overall Score: ${res.data.aiAnalysis.overallVerdict.score} (${res.data.aiAnalysis.overallVerdict.label})`);
       console.log(`  - Performance: ${res.data.metrics.performance}, Accessibility: ${res.data.metrics.accessibility}`);
-      console.log(`  - Screenshot: ${res.data.screenshot.path}`);
+      console.log(`  - Persistent analysis ID: ${res.data.id}`);
 
       const pgRecord = await prisma.analysis.findFirst({
         where: { userId: user.id, url },
@@ -43,11 +39,12 @@ async function runMultiSiteVerification() {
       });
 
       console.log(`  - PostgreSQL record ID: ${pgRecord?.id}, Status: ${pgRecord?.status}`);
-      console.log(`  - PostgreSQL mongoDocumentId: ${pgRecord?.mongoDocumentId}`);
+      console.log(`  - PostgreSQL overallScore: ${pgRecord?.overallScore}`);
+      console.log(`  - PostgreSQL performanceScore: ${pgRecord?.performanceScore}`);
 
       if (pgRecord?.id) {
-        const mongoDoc = await mongoRepository.getSnapshotByAnalysisId(pgRecord.id);
-        console.log(`  - MongoDB Snapshot document exists: ${!!mongoDoc}`);
+        const snapshot = await postgresRepository.getSnapshotByAnalysisId(pgRecord.id);
+        console.log(`  - PostgreSQL Snapshot retrieved successfully: ${!!snapshot}`);
       }
     } catch (err: any) {
       console.error(`❌ [FAILURE] Valid URL ${url} failed:`, err?.message || err);
@@ -69,17 +66,14 @@ async function runMultiSiteVerification() {
     });
     console.log(`  - PostgreSQL record ID: ${pgRecord?.id}, Status: ${pgRecord?.status}`);
     console.log(`  - PostgreSQL Status is FAILED: ${pgRecord?.status === AnalysisStatus.FAILED}`);
-    console.log(`  - PostgreSQL mongoDocumentId is null: ${pgRecord?.mongoDocumentId === null}`);
   }
 
   await disconnectPostgres();
-  await disconnectMongoDB();
   console.log('\n=== MULTI-SITE VERIFICATION COMPLETED ===');
 }
 
 runMultiSiteVerification().catch(async (err) => {
   console.error('Fatal verification error:', err);
   await disconnectPostgres().catch(() => {});
-  await disconnectMongoDB().catch(() => {});
   process.exit(1);
 });

@@ -4,7 +4,7 @@
 [![React Version](https://img.shields.io/badge/react-v18.2.0-blue.svg)](https://react.dev/)
 [![Express Version](https://img.shields.io/badge/express-v4.19.2-lightgrey.svg)](https://expressjs.com/)
 [![Prisma Version](https://img.shields.io/badge/prisma-v7.9.1-blueviolet.svg)](https://www.prisma.io/)
-[![Mongoose Version](https://img.shields.io/badge/mongoose-v9.9.2-green.svg)](https://mongoosejs.com/)
+[![PostgreSQL](https://img.shields.io/badge/postgresql-15%2B-blue.svg)](https://www.postgresql.org/)
 [![Gemini AI](https://img.shields.io/badge/gemini--ai-3.6--flash-orange.svg)](https://ai.google.dev/)
 
 **UIVerdict** is a full-stack, automated UI/UX evaluation platform. Given any public website URL, UIVerdict performs a comprehensive, multi-stage forensic audit within ~60 seconds—combining headless browser screenshot capture, performance and accessibility audits, deterministic global scoring, and structured qualitative critique powered by Gemini AI.
@@ -38,7 +38,7 @@ Designing high-performing, accessible, and visually compelling web interfaces re
 
 1. **Automated Scanning**: Captures full-page high-resolution screenshots and executes core web performance/accessibility audits automatically.
 2. **AI-Powered Design Critique**: Passes audit evidence and visual telemetry to Google Gemini AI for structured qualitative feedback (critique paragraphs, specific design strengths, and actionable areas for refinement).
-3. **Hybrid Persistence**: Stores lightweight relational data (users, projects, status) in **PostgreSQL** while persisting complete audit snapshots in **MongoDB**.
+3. **Single Source of Truth Persistence**: Stores relational data, audit metrics, scores, Core Web Vitals, and structured AI analyses directly in **PostgreSQL** via **Prisma ORM**.
 4. **Interactive Dashboard & Historical Archive**: Renders comprehensive forensic scorecards and provides an authenticated evaluation archive for tracking UI/UX quality over time.
 
 ---
@@ -67,8 +67,7 @@ flowchart TD
         API -->|2. Capture Screenshot| PW[Playwright / Chromium]
         API -->|3. Run Audit| LH[Lighthouse Audit Engine]
         API -->|4. Generate Critique| AI[Gemini 3.6 Flash AI]
-        API -->|5. Save Snapshot| MG[(MongoDB)]
-        API -->|6. Mark Complete| PG2[(PostgreSQL)]
+        API -->|5. Save Complete Analysis & Mark Complete| PG2[(PostgreSQL)]
     end
     
     API -->|HTTP 200 + Payload| SPA
@@ -104,7 +103,6 @@ graph TB
 
     subgraph Data Stores
         Prisma[(PostgreSQL / Prisma ORM)]
-        Mongo[(MongoDB / Mongoose ODM)]
     end
 
     Vite -->|HTTP / Cookies| Express
@@ -114,7 +112,6 @@ graph TB
     AnalysisSvc --> Lighthouse
     AnalysisSvc --> Gemini
     AnalysisSvc --> Prisma
-    AnalysisSvc --> Mongo
 ```
 
 ---
@@ -127,8 +124,7 @@ graph TB
 | **Styling** | Tailwind CSS, Lucide Icons | Responsive modern dark-theme design system |
 | **Routing** | React Router v6 | Client-side page navigation and route protection |
 | **Backend API** | Node.js, Express, TypeScript | REST API gateway and request handling |
-| **Database (Relational)** | PostgreSQL, Prisma ORM 7 | Relational storage for users, projects, and metadata |
-| **Database (Document)** | MongoDB, Mongoose ODM 9 | Document storage for full audit snapshots |
+| **Database** | PostgreSQL, Prisma ORM 7 | Single persistence layer for users, projects, audit metrics, and AI analysis |
 | **Browser Automation** | Playwright (Chromium) | Headless page rendering and screenshot capture |
 | **Audit Engine** | Lighthouse, Chrome Launcher | Performance, accessibility, SEO, and timing audits |
 | **AI Evaluation Engine** | Google GenAI (`@google/genai`) | Qualitative UI/UX design critique with structured JSON schemas |
@@ -154,13 +150,12 @@ UIVerdict/
 │   └── vite.config.ts
 ├── backend/                  # Express REST API Server (TypeScript)
 │   ├── src/
-│   │   ├── config/           # Environment, PostgreSQL, and MongoDB connections
+│   │   ├── config/           # Environment and PostgreSQL connection
 │   │   ├── controllers/      # Route controllers (analysis, auth, archive)
 │   │   ├── errors/           # Custom ApiError class and error handling
 │   │   ├── middleware/       # JWT auth, Zod validation, error middleware
-│   │   ├── models/           # Mongoose schemas (AnalysisSnapshot)
 │   │   ├── prompts/          # Gemini AI prompt templates
-│   │   ├── repositories/     # Database abstraction layer (PostgreSQL & MongoDB)
+│   │   ├── repositories/     # Database repository layer (PostgreSQL / Prisma)
 │   │   ├── routes/           # Versioned API routes (/api/v1/*)
 │   │   ├── services/         # Orchestration (Playwright, Lighthouse, Gemini, Analysis)
 │   │   ├── validators/       # Zod validation schemas
@@ -189,7 +184,6 @@ Ensure you have the following installed on your development machine:
 - **Node.js**: `v20.0.0` or higher
 - **npm**: `v9.0.0` or higher
 - **PostgreSQL**: `v14.0` or higher (running locally or remote connection)
-- **MongoDB**: `v6.0` or higher (MongoDB Community Server or MongoDB Atlas cluster)
 - **Google Gemini API Key**: Obtain a key from [Google AI Studio](https://aistudio.google.com/)
 
 ---
@@ -237,20 +231,26 @@ NODE_ENV=development
 FRONTEND_URL=http://localhost:5173
 JWT_SECRET=your_secure_jwt_secret_key_here
 GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL=gemini-3.6-flash
+GEMINI_MODEL=gemini-3.8-flash
+GEMINI_FALLBACK_MODEL=gemini-3.6-flash
+GEMINI_LAST_FALLBACK_MODEL=gemini-3.5-flash-lite
+GEMINI_TIMEOUT_MS=12000
+GEMINI_DEADLINE_MS=45000
+GEMINI_MAX_ATTEMPTS=2
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/uiverdict?schema=public
-MONGODB_URI=mongodb://localhost:27017/uiverdict
 ```
 
 #### 4. Run PostgreSQL Database Migrations
 
-Apply the Prisma migrations to initialize your PostgreSQL database schema:
+Apply pending Prisma migrations once, before starting backend instances:
 
 ```bash
 cd backend
-npx prisma migrate dev --name init
-npx prisma generate
+npm run migrate
+npm run build
 ```
+
+For Railway deployments, configure `npm run migrate` as the service's one-time pre-deploy command and `npm run start` as its application start command. The repository does not contain Railway service configuration, so verify those service settings before deployment.
 
 #### 5. Start the Application
 
@@ -283,12 +283,18 @@ Open your browser and navigate to `http://localhost:5173`.
 | `FRONTEND_URL` | Backend | Allowed CORS origin(s) | `http://localhost:5173` |
 | `JWT_SECRET` | Backend | Secret key used to sign session cookies | `your_secret_key` |
 | `GEMINI_API_KEY` | Backend | API Key for Google GenAI | `AIzaSy...` |
-| `GEMINI_MODEL` | Backend | Gemini model identifier | `gemini-3.6-flash` |
+| `GEMINI_MODEL` | Backend | Primary Gemini model identifier | `gemini-3.8-flash` |
+| `GEMINI_FALLBACK_MODEL` | Backend | First fallback model | `gemini-3.6-flash` |
+| `GEMINI_LAST_FALLBACK_MODEL` | Backend | Last fallback model | `gemini-3.5-flash-lite` |
+| `GEMINI_TIMEOUT_MS` | Backend | Per-request Gemini timeout | `12000` |
+| `GEMINI_DEADLINE_MS` | Backend | Overall Gemini analysis deadline | `45000` |
+| `GEMINI_MAX_ATTEMPTS` | Backend | Attempts per model | `2` |
 | `DATABASE_URL` | Backend | PostgreSQL connection string | `postgresql://...` |
-| `MONGODB_URI` | Backend | MongoDB connection string | `mongodb://...` |
 | `VITE_API_URL` | Frontend | Base backend API endpoint URL | `http://localhost:3000` |
 
 > ⚠️ **Security Warning**: Never commit real database credentials or API keys to version control. Keep secrets strictly within gitignored `.env` files.
+
+If Gemini remains unavailable after bounded retries and model fallback, UIVerdict saves the actual Lighthouse metrics as a completed partial report. Its `aiStatus` is `UNAVAILABLE`; that report contains no generated AI score, critique, or recommendations.
 
 ---
 
@@ -307,7 +313,7 @@ Open your browser and navigate to `http://localhost:5173`.
 
 | Method | Endpoint | Description | Auth Required |
 |---|---|---|---|
-| `POST` | `/api/v1/analyze` | Executes the complete 7-stage website analysis pipeline | Optional |
+| `POST` | `/api/v1/analyze` | Executes the website analysis pipeline, persists the completed report, and returns its ID | Optional |
 
 #### Example Request (`POST /api/v1/analyze`):
 ```json
@@ -322,11 +328,8 @@ Open your browser and navigate to `http://localhost:5173`.
   "status": "success",
   "message": "Analysis completed successfully",
   "data": {
+    "id": "<saved-analysis-id>",
     "url": "https://example.com",
-    "screenshot": {
-      "filename": "20260902-101500-example-com-a1b2c3.png",
-      "path": "temp/screenshots/20260902-101500-example-com-a1b2c3.png"
-    },
     "metrics": {
       "performance": 92,
       "accessibility": 88,
@@ -364,6 +367,7 @@ Open your browser and navigate to `http://localhost:5173`.
 | Method | Endpoint | Description | Auth Required |
 |---|---|---|---|
 | `GET` | `/api/v1/analyses` | Fetches historical evaluation records with pagination and status filters | Yes |
+| `GET` | `/api/v1/reports/:analysisId` | Retrieves a saved report from PostgreSQL | Owner or guest report cookie |
 
 **Query Parameters**:
 - `page` (default: `1`)
@@ -397,36 +401,33 @@ sequenceDiagram
     participant PW as Playwright
     participant LH as Lighthouse
     participant AI as Gemini AI
-    participant MG as MongoDB (Mongoose)
 
     User->>Controller: POST /api/v1/analyze { url }
     Controller->>Service: analyzeUrl(url, userId)
     Service->>PG: Create Transaction (Project + Analysis [PROCESSING])
     Service->>PW: captureScreenshot(url)
-    PW-->>Service: Return screenshot path & filename
+    PW-->>Service: Return temporary screenshot path
     Service->>LH: runAudit(url)
     LH-->>Service: Return Lighthouse metrics (FCP, LCP, A11y, etc.)
     Service->>AI: generateAnalysis(metrics, screenshot)
     AI-->>Service: Return holistic UIVerdict JSON (Independent score, verdict label, critique, strengths, refinements)
-    Service->>MG: saveSnapshot(analysisId, metrics, aiAnalysis, screenshot)
-    MG-->>Service: Return mongoSnapshot._id
-    Service->>PG: updateAnalysisStatus(analysisId, COMPLETED, mongoDocumentId)
+    Service->>PG: saveAnalysisResult(metrics, aiAnalysis, status: COMPLETED)
+    PG-->>Service: Return updated Analysis record
     Service-->>Controller: Return AnalysisResponse JSON
     Controller-->>User: HTTP 200 OK Response
 ```
 
 ---
 
-## Data Architecture (Hybrid Storage)
+## Data Architecture (Single Source of Truth)
 
-UIVerdict employs a hybrid dual-database strategy tailored to access patterns:
+UIVerdict uses PostgreSQL + Prisma as the single persistence layer for all application data:
 
 ```mermaid
 erDiagram
     USER ||--o{ PROJECT : owns
     USER ||--o{ ANALYSIS : creates
     PROJECT ||--o{ ANALYSIS : contains
-    ANALYSIS ||--|| ANALYSIS_SNAPSHOT : references
 
     USER {
         string id PK
@@ -448,29 +449,36 @@ erDiagram
         string userId FK
         string url
         enum status
-        string mongoDocumentId
+        float overallScore
+        string verdictLabel
+        int performanceScore
+        int accessibilityScore
+        int bestPracticesScore
+        int seoScore
+        string firstContentfulPaint
+        string largestContentfulPaint
+        string speedIndex
+        string totalBlockingTime
+        string cumulativeLayoutShift
+        string timeToInteractive
+        json qualitativeCritique
+        json strengths
+        json areasForRefinement
         datetime createdAt
-    }
-
-    ANALYSIS_SNAPSHOT {
-        string id PK
-        string analysisId UK
-        string url
-        json screenshot
-        json metrics
-        json aiAnalysis
-        datetime createdAt
+        datetime updatedAt
     }
 ```
 
-- **PostgreSQL (Relational Metadata)**: Handles core relational entities (`User`, `Project`, `Analysis`), enforcing relational integrity, foreign key constraints, fast indexed filtering, and user ownership logic.
-- **MongoDB (Unstructured Audit Snapshots)**: Stores full high-fidelity audit documents (`AnalysisSnapshot`), allowing flexible snapshot payload structures without requiring rigid SQL table migrations.
+- **PostgreSQL (Single Source of Truth)**: Handles all relational data (`User`, `Project`, `Analysis`), enforcing relational integrity, foreign key constraints, fast indexed filtering, and user ownership logic.
+- **Relational Columns for Scalar Audit Data**: High-frequency metrics such as performance scores, Core Web Vitals, overall UIVerdict score, and status are stored as native relational columns for fast indexing and aggregation.
+- **JSON Columns for Structured Feedback**: Genuinely nested qualitative feedback (`qualitativeCritique`, `strengths`, `areasForRefinement`) is stored in JSON columns directly in the `analyses` table.
+- **Temporary screenshot evidence**: Playwright writes a temporary local screenshot for Gemini; the backend removes it after analysis and does not persist screenshot metadata.
 
 ---
 
 ## Reports & Historical Archive
 
-- **Interactive Report**: Once an analysis resolves, the application displays a detailed forensic scorecard containing category progress bars, Lighthouse Web Vitals, qualitative critique, strengths, and actionable refinements.
+- **Interactive Report**: Reports are persisted in PostgreSQL and fetched by analysis ID, so a saved report can be reloaded without browser session storage.
 - **Data Log Archive**: The Archive page lists all past evaluations for the authenticated user, supported by server-side pagination, search filtering, and raw JSON export functionality.
 
 ---
@@ -487,8 +495,8 @@ npm test
 ### Test Suite Coverage:
 - `tests/auth.service.test.ts`: User registration, duplicate email rejection, bcrypt hashing, authentication, and archive isolation.
 - `tests/gemini.service.test.ts`: Gemini API model response generation and Zod schema validation.
-- `tests/persistence.service.test.ts`: Prisma PostgreSQL transaction flows and Mongoose MongoDB document persistence.
-- `tests/multi_site_verify.test.ts`: End-to-end multi-site URL analysis verification.
+- `tests/persistence.service.test.ts`: Prisma PostgreSQL single-source persistence, transaction flows, metrics persistence, and URL aggregation.
+- `tests/multi_site_verify.test.ts`: End-to-end multi-site URL analysis verification with PostgreSQL.
 
 ---
 
@@ -497,11 +505,7 @@ npm test
 ### 1. PostgreSQL Connection Error
 - Ensure PostgreSQL is running on port `5432`.
 - Verify `DATABASE_URL` in `backend/.env`.
-- Test connection using `npx prisma db push`.
-
-### 2. MongoDB Connection Error
-- Ensure MongoDB is running on port `27017` or verify your MongoDB Atlas cluster URI.
-- Verify `MONGODB_URI` in `backend/.env`.
+- Test connection using `npx prisma migrate status`.
 
 ### 3. Playwright / Chromium Launch Failure
 - Run `npx playwright install chromium` in the `backend/` directory to download required browser binaries.

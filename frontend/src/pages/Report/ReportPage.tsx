@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, useLocation, Link } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import { fetchReportById } from '../../services/report.service';
 import { ReportData } from '../../types/report';
 import { ReportHeader } from '../../components/report/ReportHeader';
@@ -11,22 +11,24 @@ import { useAuth } from '../../contexts/AuthContext';
 
 export const ReportPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
-  const location = useLocation();
   const [report, setReport] = useState<ReportData | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
   const { isAuthenticated } = useAuth();
 
   useEffect(() => {
     let isMounted = true;
     setLoading(true);
+    setError(null);
 
-    if (location.state?.report) {
-      setReport(location.state.report);
+    if (!id) {
+      setReport(null);
+      setError('Report not found.');
       setLoading(false);
       return;
     }
 
-    fetchReportById(id || '749-X2')
+    fetchReportById(id)
       .then((data) => {
         if (isMounted) {
           setReport(data);
@@ -35,6 +37,8 @@ export const ReportPage: React.FC = () => {
       })
       .catch(() => {
         if (isMounted) {
+          setReport(null);
+          setError('This report could not be found or you do not have access to it.');
           setLoading(false);
         }
       });
@@ -42,7 +46,7 @@ export const ReportPage: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, [id, location.state]);
+  }, [id]);
 
   if (loading) {
     return (
@@ -55,7 +59,13 @@ export const ReportPage: React.FC = () => {
     );
   }
 
-  if (!report) return null;
+  if (!report) {
+    return (
+      <div className="max-w-container-max mx-auto px-margin-desktop py-stack-lg min-h-[50vh] flex items-center justify-center">
+        <p className="font-mono-data text-on-surface-variant">{error || 'Report unavailable.'}</p>
+      </div>
+    );
+  }
 
   return (
     <main className="max-w-container-max mx-auto px-margin-desktop py-stack-lg flex flex-col gap-stack-lg">
@@ -78,6 +88,12 @@ export const ReportPage: React.FC = () => {
         latency={report.latency}
       />
 
+      {report.aiStatus === 'UNAVAILABLE' && (
+        <div role="status" className="border border-amber-700 bg-amber-950/40 p-4 font-mono-data text-sm text-amber-200">
+          AI feedback is unavailable for this report. The scores and Web Vitals below come from Lighthouse; no AI critique or overall score was generated.
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-12 gap-gutter bg-[#2a2a2a] p-gutter">
         <ScorePanel
           overallScore={report.overallScore}
@@ -87,11 +103,15 @@ export const ReportPage: React.FC = () => {
         />
 
         <div className="md:col-span-8 flex flex-col gap-gutter bg-[#2a2a2a] relative">
-          {isAuthenticated ? (
+          {isAuthenticated && report.aiStatus === 'AVAILABLE' ? (
             <>
               <QualitativeCritique critique={report.qualitativeCritique} />
               <StrengthsRefinements strengths={report.strengths} refinements={report.refinements} />
             </>
+          ) : report.aiStatus === 'UNAVAILABLE' ? (
+            <div className="border border-[#2a2a2a] bg-[#151515] p-8 text-center font-mono-data text-sm text-[#bbbbbb]">
+              Qualitative critique and recommendations were not generated because Gemini was unavailable.
+            </div>
           ) : (
             <div className="relative border border-[#2a2a2a] bg-[#151515] p-8 flex flex-col items-center justify-center text-center min-h-[380px] overflow-hidden">
               {/* Blurred background preview */}

@@ -21,5 +21,6 @@ RUN npm run build
 ENV PORT=8080
 EXPOSE 8080
 
-# Execute database migrations on container start then start the server
+# Database migrations run as a one-time deployment pre-deploy command (`npm run migrate`).
+# The application container starts only the server to avoid per-replica migration races.
 CMD ["npm", "run", "start"]

@@ -1,51 +1,68 @@
-import reportMock from '../data/report.json';
 import { ReportData } from '../types/report';
+import { API_URL } from '../config/api.config';
 
-const reportsCache = new Map<string, ReportData>();
-
-export function storeReport(report: ReportData): void {
-  if (!report || !report.evaluationId) return;
-  reportsCache.set(report.evaluationId, report);
-  try {
-    sessionStorage.setItem(`uiverdict_report_${report.evaluationId}`, JSON.stringify(report));
-    sessionStorage.setItem('uiverdict_latest_report', JSON.stringify(report));
-  } catch (e) {
-    // Ignore storage errors
-  }
+interface SavedReportResponse {
+  status: string;
+  data: {
+    id: string;
+    url: string;
+    createdAt: string;
+    aiStatus: 'AVAILABLE' | 'UNAVAILABLE';
+    metrics: {
+      performance: number;
+      accessibility: number;
+      bestPractices: number;
+      seo: number;
+      firstContentfulPaint: string;
+      largestContentfulPaint: string;
+      speedIndex: string;
+      totalBlockingTime: string;
+      cumulativeLayoutShift: string;
+      timeToInteractive: string;
+    };
+    aiAnalysis: {
+      overallVerdict: { score: number; label: string };
+      qualitativeCritique: string[];
+      strengths: string[];
+      areasForRefinement: string[];
+    } | null;
+  };
 }
 
-export async function fetchReportById(id?: string): Promise<ReportData> {
-  if (id && reportsCache.has(id)) {
-    return reportsCache.get(id)!;
-  }
+export async function fetchReportById(id: string): Promise<ReportData> {
+  const response = await fetch(`${API_URL}/api/v1/reports/${encodeURIComponent(id)}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!response.ok) throw new Error(response.status === 404 ? 'Report not found or access denied.' : 'Failed to retrieve report.');
 
-  if (id) {
-    try {
-      const stored = sessionStorage.getItem(`uiverdict_report_${id}`);
-      if (stored) {
-        const parsed = JSON.parse(stored) as ReportData;
-        reportsCache.set(id, parsed);
-        return parsed;
-      }
-    } catch (e) {
-      // Ignore storage errors
-    }
-  }
-
-  try {
-    const latest = sessionStorage.getItem('uiverdict_latest_report');
-    if (latest) {
-      const parsed = JSON.parse(latest) as ReportData;
-      if (!id || id === parsed.evaluationId || id === 'latest' || id === '749-X2') {
-        return parsed;
-      }
-    }
-  } catch (e) {
-    // Ignore storage errors
-  }
+  const result: SavedReportResponse = await response.json();
+  const saved = result.data;
+  const cls = Number.parseFloat(saved.metrics.cumulativeLayoutShift);
 
   return {
-    ...reportMock,
-    evaluationId: id || reportMock.evaluationId,
-  } as ReportData;
+    evaluationId: saved.id,
+    algorithm: 'UIVERDICT // COMPLETED ANALYSIS',
+    timestamp: new Date(saved.createdAt).toISOString(),
+    latency: '—',
+    overallScore: saved.aiAnalysis?.overallVerdict.score ?? null,
+    verdictStatus: saved.aiAnalysis?.overallVerdict.label ?? 'AI UNAVAILABLE',
+    aiStatus: saved.aiStatus,
+    metrics: {
+      performance: saved.metrics.performance,
+      accessibility: saved.metrics.accessibility,
+      bestPractices: saved.metrics.bestPractices,
+      seoStructure: saved.metrics.seo,
+      firstContentfulPaint: saved.metrics.firstContentfulPaint,
+      largestContentfulPaint: saved.metrics.largestContentfulPaint,
+      speedIndex: saved.metrics.speedIndex,
+      totalBlockingTime: saved.metrics.totalBlockingTime,
+      cumulativeLayoutShift: Number.isFinite(cls) ? cls : 0,
+      timeToInteractive: saved.metrics.timeToInteractive,
+    },
+    qualitativeCritique: saved.aiAnalysis?.qualitativeCritique ?? [],
+    strengths: saved.aiAnalysis?.strengths ?? [],
+    refinements: saved.aiAnalysis?.areasForRefinement ?? [],
+    url: saved.url,
+  };
 }

@@ -16,16 +16,13 @@ export interface ReportData {
   algorithm: string;
   timestamp: string;
   latency: string;
-  overallScore: number;
+  overallScore: number | null;
   verdictStatus: string;
+  aiStatus: 'AVAILABLE' | 'UNAVAILABLE';
   metrics: ReportMetrics;
   qualitativeCritique: string[];
   strengths: string[];
   refinements: string[];
   url?: string;
-  screenshot?: {
-    filename: string;
-    path: string;
-  };
 }
 

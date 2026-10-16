@@ -1,12 +1,13 @@
 import app from './app';
 import { config } from './config';
-import { connectPostgres } from './config/postgres';
-import { connectMongoDB } from './config/mongodb';
+import { connectPostgres, prisma } from './config/postgres';
 
 const PORT = config.port;
 
 const startServer = async () => {
-  await Promise.allSettled([connectPostgres(), connectMongoDB()]);
+  await connectPostgres();
+  // connectPostgres logs connection errors; verify readiness before accepting traffic.
+  await prisma.$queryRaw`SELECT 1`;
 
   const serverInstance = app.listen(PORT, () => {
     console.log(`🚀 Server listening on port ${PORT} in ${config.nodeEnv} mode`);
@@ -21,7 +22,10 @@ const startServer = async () => {
   return serverInstance;
 };
 
-const server = startServer();
+const server = startServer().catch((error) => {
+  console.error('Backend startup failed:', error?.message || error);
+  process.exit(1);
+});
 
 process.on('unhandledRejection', (reason: Error) => {
   console.error('Unhandled Rejection:', reason);
@@ -33,4 +37,3 @@ process.on('uncaughtException', (error: Error) => {
 });
 
 export default server;
-

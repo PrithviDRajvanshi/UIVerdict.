@@ -13,7 +13,6 @@ The backend application (`backend/src`) is organized into distinct domain layers
 backend/src/
 ├── config/
 │   ├── env.ts                   # Environment variable parsing & validation
-│   ├── mongodb.ts               # Mongoose connection manager
 │   └── postgres.ts              # Prisma client initialization & connection manager
 ├── controllers/
 │   ├── analysis.controller.ts   # Handler for POST /api/v1/analyze
@@ -26,12 +25,7 @@ backend/src/
 │   ├── errorHandler.ts          # Express global error handler
 │   ├── notFound.ts              # 404 handler
 │   └── validate.ts              # Zod request body validation middleware
-├── models/
-│   └── mongo/
-│       └── snapshot.model.ts    # Mongoose schema for AnalysisSnapshot
 ├── repositories/
-│   ├── mongo/
-│   │   └── mongo.repository.ts  # MongoRepository abstraction
 │   └── postgres/
 │       └── postgres.repository.ts # PostgresRepository abstraction
 ├── routes/
@@ -88,7 +82,7 @@ frontend/src/
 │   ├── analysis.service.ts      # API call to POST /api/v1/analyze
 │   ├── auth.service.ts          # API calls to /api/v1/auth/*
 │   ├── history.service.ts       # API call to GET /api/v1/analyses
-│   └── report.service.ts        # In-memory and sessionStorage report cache
+│   └── report.service.ts        # Fetches saved reports from the PostgreSQL-backed API
 ├── types/
 │   ├── analysis.ts              # Analysis dashboard TypeScript types
 │   ├── history.ts               # Archive table TypeScript types
@@ -165,6 +159,7 @@ res.cookie('token', token, {
 ```typescript
 public async analyzeUrl(url: string, userId?: string): Promise<AnalysisResponse> {
   let analysisId: string | null = null;
+  let screenshotData: ScreenshotResult | null = null;
 
   try {
     // Phase 1: PostgreSQL Record Creation (Status: PROCESSING)
@@ -172,7 +167,7 @@ public async analyzeUrl(url: string, userId?: string): Promise<AnalysisResponse>
     analysisId = analysis.id;
 
     // Phase 2: Full-Page Screenshot Capture
-    const screenshotData: ScreenshotResult = await playwrightService.captureScreenshot(url);
+    screenshotData = await playwrightService.captureScreenshot(url);
 
     // Phase 3: Lighthouse Performance & Accessibility Audit
     const metrics: LighthouseMetrics = await lighthouseService.runAudit(url);
@@ -184,32 +179,25 @@ public async analyzeUrl(url: string, userId?: string): Promise<AnalysisResponse>
       screenshot: screenshotData,
     });
 
-    // Phase 5: MongoDB Document Snapshot Storage
-    const mongoSnapshot = await mongoRepository.saveSnapshot({
-      analysisId: analysis.id,
-      url,
-      screenshot: screenshotData,
+    // Phase 5: Complete Analysis Persistence to PostgreSQL
+    await postgresRepository.saveAnalysisResult(analysis.id, {
       metrics,
       aiAnalysis,
+      status: AnalysisStatus.COMPLETED,
     });
-
-    // Phase 6: PostgreSQL Status Update to COMPLETED
-    await postgresRepository.updateAnalysisStatus(
-      analysis.id,
-      AnalysisStatus.COMPLETED,
-      mongoSnapshot._id.toString()
-    );
 
     return {
       status: 'success',
       message: 'Analysis completed successfully',
-      data: { url, screenshot: { filename: screenshotData.filename, path: screenshotData.path }, metrics, aiAnalysis },
+      data: { id: analysis.id, url, metrics, aiAnalysis },
     };
   } catch (error: any) {
     if (analysisId) {
       await postgresRepository.updateAnalysisStatus(analysisId, AnalysisStatus.FAILED);
     }
     throw error;
+  } finally {
+    if (screenshotData) await playwrightService.removeScreenshot(screenshotData);
   }
 }
 ```
@@ -303,7 +291,21 @@ erDiagram
         String userId FK "nullable"
         String url
         AnalysisStatus status "PENDING | PROCESSING | COMPLETED | FAILED"
-        String mongoDocumentId "nullable"
+        Float overallScore "nullable"
+        String verdictLabel "nullable"
+        Int performanceScore "nullable"
+        Int accessibilityScore "nullable"
+        Int bestPracticesScore "nullable"
+        Int seoScore "nullable"
+        String firstContentfulPaint "nullable"
+        String largestContentfulPaint "nullable"
+        String speedIndex "nullable"
+        String totalBlockingTime "nullable"
+        String cumulativeLayoutShift "nullable"
+        String timeToInteractive "nullable"
+        Json qualitativeCritique "nullable"
+        Json strengths "nullable"
+        Json areasForRefinement "nullable"
         DateTime createdAt
         DateTime updatedAt
     }
@@ -315,45 +317,11 @@ erDiagram
 
 ---
 
-## 10. MongoDB / Mongoose Data Design
+## 10. PostgreSQL Single Source Data Design
 
-### 10.1 `AnalysisSnapshot` Schema
-
-```typescript
-const AnalysisSnapshotSchema = new Schema<IAnalysisSnapshot>(
-  {
-    analysisId: { type: String, required: true, unique: true, index: true },
-    url: { type: String, required: true, index: true },
-    screenshot: {
-      url: { type: String, required: true },
-      filename: { type: String, required: true },
-      path: { type: String, required: true },
-    },
-    metrics: {
-      performance: { type: Number, required: true },
-      accessibility: { type: Number, required: true },
-      bestPractices: { type: Number, required: true },
-      seo: { type: Number, required: true },
-      firstContentfulPaint: { type: String, required: true },
-      largestContentfulPaint: { type: String, required: true },
-      speedIndex: { type: String, required: true },
-      totalBlockingTime: { type: String, required: true },
-      cumulativeLayoutShift: { type: String, required: true },
-      timeToInteractive: { type: String, required: true },
-    },
-    aiAnalysis: {
-      overallVerdict: {
-        score: { type: Number, required: true },
-        label: { type: String, required: true },
-      },
-      qualitativeCritique: [{ type: String, required: true }],
-      strengths: [{ type: String, required: true }],
-      areasForRefinement: [{ type: String, required: true }],
-    },
-  },
-  { timestamps: true }
-);
-```
+All analysis audit data is persisted directly in PostgreSQL:
+- **Relational scalar columns**: Core Web Vitals, Lighthouse metrics, overall score, and verdict label.
+- **JSON columns**: Structured AI qualitative feedback (`qualitativeCritique`, `strengths`, `areasForRefinement`).
 
 ---
 
@@ -361,10 +329,12 @@ const AnalysisSnapshotSchema = new Schema<IAnalysisSnapshot>(
 
 - **`PostgresRepository`**:
   - `createAnalysisTransaction(url, projectName, userId)`: Executes Prisma interactive transaction to find/create default project and create initial `Analysis` record with status `PROCESSING`.
-  - `updateAnalysisStatus(id, status, mongoDocumentId)`: Updates analysis status to `COMPLETED` or `FAILED`.
-- **`MongoRepository`**:
-  - `saveSnapshot(snapshotData)`: Inserts or updates `AnalysisSnapshot` document by `analysisId`.
-  - `getSnapshotByAnalysisId(analysisId)`: Retrieves snapshot document by `analysisId`.
+  - `saveAnalysisResult(analysisId, input)`: Atomically persists audit metrics and AI feedback and updates status to `COMPLETED`.
+  - `getCompletedReport(analysisId, access)`: Retrieves a completed report scoped to its owner or a valid guest capability.
+  - `updateAnalysisStatus(id, status)`: Updates analysis status to `COMPLETED` or `FAILED`.
+  - `getSnapshotByAnalysisId(analysisId)`: Formats and returns full snapshot structure from PostgreSQL record.
+  - `getSnapshotsByUrl(url, limit)`: Retrieves historical analysis snapshots for a target URL.
+  - `getAnalysisStatsByUrl(url)`: Aggregates average scores and counts across historical analyses in PostgreSQL.
 
 ---
 
@@ -411,6 +381,6 @@ Executes unit and integration test scripts sequentially using `ts-node`:
 2. **`gemini.service.test.ts`**:
    - Mocks inputs and validates Gemini API structured output generation against Zod schemas.
 3. **`persistence.service.test.ts`**:
-   - Validates Prisma PostgreSQL transactions and Mongoose MongoDB document creation/retrieval.
+   - Validates Prisma PostgreSQL transactions, complete metrics persistence, snapshot formatting, and URL statistical aggregations.
 4. **`multi_site_verify.test.ts`**:
    - Integration script testing live URLs through the full pipeline.

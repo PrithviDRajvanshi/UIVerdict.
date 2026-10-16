@@ -3,8 +3,9 @@ import jwt from 'jsonwebtoken';
 import { prisma } from '../config/postgres';
 import { ApiError } from '../errors/ApiError';
 import { RegisterInput, LoginInput } from '../validators/auth.validator';
+import { config } from '../config/env';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'uiverdict-secret-jwt-key';
+const JWT_SECRET = config.jwtSecret;
 
 export interface UserResponse {
   id: string;

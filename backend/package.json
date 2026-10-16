@@ -6,9 +6,10 @@
   "main": "dist/server.js",
   "scripts": {
     "build": "prisma generate && tsc",
-    "start": "prisma migrate deploy && node dist/server.js",
+    "migrate": "prisma migrate deploy",
+    "start": "node dist/server.js",
     "dev": "ts-node src/server.ts",
-    "test": "ts-node tests/auth.service.test.ts && ts-node tests/gemini.service.test.ts && ts-node tests/persistence.service.test.ts"
+    "test": "ts-node tests/auth-middleware.test.ts && ts-node tests/report-access.test.ts && ts-node tests/auth.service.test.ts && ts-node tests/gemini.service.test.ts && ts-node tests/persistence.service.test.ts && ts-node tests/browser-diagnostics.test.ts && ts-node tests/diagnostic-persistence.test.ts && ts-node tests/screenshot-retention.test.ts && ts-node tests/lighthouse-diagnostics.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.16.0",
@@ -24,7 +25,6 @@
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.3",
     "lighthouse": "^13.4.1",
-    "mongoose": "^9.9.2",
     "morgan": "^1.10.0",
     "pg": "^8.23.0",
     "playwright": "^1.62.1",

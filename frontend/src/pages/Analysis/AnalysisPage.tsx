@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { analyzeWebsite, mapBackendToReportData } from '../../services/analysis.service';
-import { storeReport } from '../../services/report.service';
+import { analyzeWebsite } from '../../services/analysis.service';
 
 interface Stage {
   id: string;
@@ -14,7 +13,7 @@ const STAGES: Stage[] = [
   { id: '2', label: 'Capturing High-Res Screenshot', threshold: 20 },
   { id: '3', label: 'Auditing Performance & Accessibility', threshold: 50 },
   { id: '4', label: 'Qualitative UI/UX Evaluation', threshold: 75 },
-  { id: '5', label: 'Persisting Snapshots & Finalizing Verdict', threshold: 95 },
+  { id: '5', label: 'Saving Report & Finalizing Verdict', threshold: 95 },
 ];
 
 export const AnalysisPage: React.FC = () => {
@@ -68,19 +67,15 @@ export const AnalysisPage: React.FC = () => {
 
     analyzeWebsite(urlToAnalyze)
       .then((data) => {
-        console.log('[Analysis UI] Response received:', data);
-
-        const reportData = mapBackendToReportData(data);
-        console.log('[Analysis UI] Parsed report data:', reportData);
-        storeReport(reportData);
+        console.log('[Analysis UI] Analysis persisted with ID:', data.id);
 
         // Transition to 100% completion state
         setProgress(100);
         setLoading(false);
         hasFiredRef.current = null;
 
-        console.log('[Analysis UI] Navigating to report:', reportData.evaluationId);
-        navigate(`/report/${reportData.evaluationId}`, { state: { report: reportData } });
+        console.log('[Analysis UI] Navigating to saved report:', data.id);
+        navigate(`/report/${data.id}`);
       })
       .catch((err) => {
         console.error('[Analysis UI] Request failed:', err);
