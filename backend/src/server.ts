@@ -9,7 +9,7 @@ const startServer = async () => {
   // connectPostgres logs connection errors; verify readiness before accepting traffic.
   await prisma.$queryRaw`SELECT 1`;
 
-  const serverInstance = app.listen(PORT, () => {
+  const serverInstance = app.listen(PORT,'0.0.0.0', () => {
     console.log(`🚀 Server listening on port ${PORT} in ${config.nodeEnv} mode`);
   });
 
