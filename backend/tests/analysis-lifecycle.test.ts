@@ -8,6 +8,7 @@ import { AnalysisStatus } from '@prisma/client';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { TargetPageValidationError } from '../src/services/target-page-validation';
 
 async function runAnalysisLifecycleTests() {
   const original = {
@@ -44,7 +45,7 @@ async function runAnalysisLifecycleTests() {
     timeToInteractive: '2 s',
   };
   const aiAnalysis = {
-    overallVerdict: { score: 84, label: 'GOOD' as const },
+    visualDesignScore: 84,
     qualitativeCritique: ['Clear hierarchy'],
     strengths: ['Readable layout'],
     areasForRefinement: ['Improve spacing'],
@@ -92,6 +93,31 @@ async function runAnalysisLifecycleTests() {
     assert.deepStrictEqual(statuses, [AnalysisStatus.COMPLETED]);
     assert.strictEqual(persistedPartial, true, 'real Lighthouse metrics are persisted without AI data');
     assert.strictEqual(cleaned, 1, 'temporary screenshot is cleaned after partial report');
+
+    statuses.length = 0;
+    let auditCalls = 0;
+    let geminiCalls = 0;
+    lighthouseService.runAudit = async () => { auditCalls += 1; return metrics; };
+    geminiService.generateAnalysis = async () => { geminiCalls += 1; return aiAnalysis; };
+    playwrightService.captureScreenshot = async (_url, _id, onDiagnostics) => {
+      await onDiagnostics?.({ version: 1, outcome: 'BLOCKED', requestedUrl: 'https://example.com/blocked', finalUrl: 'https://example.com/blocked', titleLength: 12, readyState: 'complete', bodyTextLength: 22, visibleElementCount: 2, imageCount: 0, buttonCount: 0, navigationDurationMs: 10, navigationTimedOut: false, navigationError: null, settlingDelayMs: 0, screenshotStartedAt: null, screenshotDurationMs: null, screenshotCompletedAt: null, screenshotError: null, validationReasonCode: 'CDN_ACCESS_DENIED', validationReason: 'The edge service denied access.', mainFrameNavigations: [], navigationResponses: [{ url: 'https://example.com/blocked', status: 403 }], httpErrorResponses: [], consoleErrors: [], pageErrors: [], failedRequests: [] });
+      throw new TargetPageValidationError({ status: 'BLOCKED', reasonCode: 'CDN_ACCESS_DENIED', reason: 'The edge service denied access.' });
+    };
+    const blocked = await service.analyzeUrl('https://example.com/blocked');
+    assert.strictEqual(blocked.data.targetValidationStatus, 'BLOCKED');
+    assert.strictEqual(blocked.data.overallScore, null);
+    assert.deepStrictEqual(statuses, [AnalysisStatus.BLOCKED]);
+    assert.strictEqual(auditCalls, 0, 'blocked target never reaches Lighthouse');
+    assert.strictEqual(geminiCalls, 0, 'blocked target never reaches Gemini');
+    playwrightService.captureScreenshot = async () => {
+      throw new TargetPageValidationError({ status: 'INCONCLUSIVE', reasonCode: 'HTTP_ERROR_STATUS', reason: 'HTTP 404 did not confirm the intended page.' });
+    };
+    const inconclusive = await service.analyzeUrl('https://example.com/missing');
+    assert.strictEqual(inconclusive.data.targetValidationStatus, 'INCONCLUSIVE');
+    assert.strictEqual(inconclusive.data.aiAnalysis, null);
+    assert.deepStrictEqual(statuses, [AnalysisStatus.BLOCKED, AnalysisStatus.INCONCLUSIVE]);
+    assert.strictEqual(auditCalls, 0, 'inconclusive target never reaches Lighthouse');
+    assert.strictEqual(geminiCalls, 0, 'inconclusive target never reaches Gemini');
   } finally {
     postgresRepository.createAnalysisTransaction = original.createAnalysisTransaction;
     postgresRepository.saveAnalysisResult = original.saveAnalysisResult;

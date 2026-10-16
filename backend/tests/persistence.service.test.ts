@@ -4,6 +4,8 @@ import { prisma } from '../src/config/postgres';
 import { AnalysisStatus } from '@prisma/client';
 import { LighthouseMetrics } from '../src/services/lighthouse.service';
 import { AiAnalysis } from '../src/validators/aiAnalysis.validator';
+import { calculateOverallScore } from '../src/services/scoring.service';
+import { resolveVerdictLabel } from '../src/validators/aiAnalysis.validator';
 
 async function runPersistenceTests() {
   console.log('--- STARTING POSTGRESQL SINGLE SOURCE OF TRUTH PERSISTENCE TESTS ---');
@@ -22,7 +24,7 @@ async function runPersistenceTests() {
     timeToInteractive: '2.8 s',
   };
   const sampleAiAnalysis: AiAnalysis = {
-    overallVerdict: { score: 89.2, label: 'GOOD' },
+    visualDesignScore: 89.2,
     qualitativeCritique: ['Great accessibility', 'Good SEO structure'],
     strengths: ['Fast FCP', 'Accessible components'],
     areasForRefinement: ['Reduce JavaScript bundle size'],
@@ -76,8 +78,10 @@ async function runPersistenceTests() {
     assert.strictEqual(saved.id, analysisId);
     assert.strictEqual(saved.status, AnalysisStatus.COMPLETED);
     // Scalar fields
-    assert.strictEqual(saved.overallScore, 89.2);
-    assert.strictEqual(saved.verdictLabel, 'GOOD');
+    const expectedOverall = calculateOverallScore(sampleAiAnalysis.visualDesignScore, sampleMetrics)!;
+    assert.strictEqual(saved.visualDesignScore, 89.2);
+    assert.strictEqual(saved.overallScore, expectedOverall);
+    assert.strictEqual(saved.verdictLabel, resolveVerdictLabel(expectedOverall));
     assert.strictEqual(saved.performanceScore, 85);
     assert.strictEqual(saved.accessibilityScore, 90);
     assert.strictEqual(saved.bestPracticesScore, 95);
@@ -108,8 +112,9 @@ async function runPersistenceTests() {
     assert.strictEqual(snapshot?.id, analysisId);
     assert.strictEqual(snapshot?.url, testUrl);
     assert.strictEqual(snapshot?.metrics.performance, 85);
-    assert.strictEqual(snapshot?.aiAnalysis?.overallVerdict.score, 89.2);
-    assert.strictEqual(snapshot?.aiAnalysis?.overallVerdict.label, 'GOOD');
+    assert.strictEqual(snapshot?.visualDesignScore, 89.2);
+    assert.strictEqual(snapshot?.aiAnalysis?.overallVerdict?.score, expectedOverall);
+    assert.strictEqual(snapshot?.aiAnalysis?.overallVerdict?.label, resolveVerdictLabel(expectedOverall));
     console.log('✓ Passed: Snapshot formatted and retrieved accurately from PostgreSQL');
   } catch (err: any) {
     console.error('❌ Test 3 failed:', err);
@@ -138,7 +143,7 @@ async function runPersistenceTests() {
     assert.strictEqual(stats[0].url, testUrl);
     assert.strictEqual(stats[0].totalAnalyses, 1);
     assert.strictEqual(stats[0].avgPerformance, 85);
-    assert.strictEqual(stats[0].avgOverallScore, 89.2);
+    assert.strictEqual(stats[0].avgOverallScore, calculateOverallScore(sampleAiAnalysis.visualDesignScore, sampleMetrics));
     console.log('✓ Passed: PostgreSQL aggregation computed stats accurately:');
     console.log('   ', JSON.stringify(stats[0]));
   } catch (err: any) {

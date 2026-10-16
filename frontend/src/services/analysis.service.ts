@@ -4,10 +4,10 @@ import { API_URL } from '../config/api.config';
 
 
 export interface BackendMetrics {
-  performance: number;
-  accessibility: number;
-  bestPractices: number;
-  seo: number;
+  performance: number | null;
+  accessibility: number | null;
+  bestPractices: number | null;
+  seo: number | null;
   firstContentfulPaint: string;
   largestContentfulPaint: string;
   speedIndex: string;
@@ -17,10 +17,7 @@ export interface BackendMetrics {
 }
 
 export interface BackendAiAnalysis {
-  overallVerdict: {
-    score: number;
-    label: string;
-  };
+  visualDesignScore: number;
   qualitativeCritique: string[];
   strengths: string[];
   areasForRefinement: string[];
@@ -32,6 +29,10 @@ export interface BackendAnalysisData {
   metrics: BackendMetrics;
   aiAnalysis: BackendAiAnalysis | null;
   aiStatus: 'AVAILABLE' | 'UNAVAILABLE';
+  status: 'VALID' | 'BLOCKED' | 'INCONCLUSIVE';
+  overallScore: number | null;
+  verdictLabel: string | null;
+  visualDesignScore: number | null;
 }
 
 export interface BackendAnalysisResponse {

@@ -19,6 +19,9 @@ export interface ReportData {
   overallScore: number | null;
   verdictStatus: string;
   aiStatus: 'AVAILABLE' | 'UNAVAILABLE';
+  status: 'COMPLETED' | 'BLOCKED' | 'INCONCLUSIVE' | 'FAILED';
+  visualDesignScore: number | null;
+  validationReason: string | null;
   metrics: ReportMetrics;
   qualitativeCritique: string[];
   strengths: string[];

@@ -4,6 +4,8 @@ import { LighthouseMetrics } from '../../services/lighthouse.service';
 import { AiAnalysis, VerdictLabel } from '../../validators/aiAnalysis.validator';
 import { sanitizeLighthouseDiagnostics, sanitizePlaywrightDiagnostics } from '../../services/browser-diagnostics';
 import { ApiError } from '../../errors/ApiError';
+import { calculateOverallScore } from '../../services/scoring.service';
+import { resolveVerdictLabel } from '../../validators/aiAnalysis.validator';
 
 export interface SaveAnalysisResultInput {
   metrics: LighthouseMetrics;
@@ -18,7 +20,18 @@ export interface SavedAnalysisReport {
   url: string;
   metrics: LighthouseMetrics;
   aiStatus: 'AVAILABLE' | 'UNAVAILABLE';
-  aiAnalysis: AiAnalysis | null;
+  aiAnalysis: {
+    visualDesignScore: number | null;
+    overallVerdict: { score: number; label: VerdictLabel } | null;
+    qualitativeCritique: string[];
+    strengths: string[];
+    areasForRefinement: string[];
+  } | null;
+  status: AnalysisStatus;
+  visualDesignScore: number | null;
+  validationReason: string | null;
+  overallScore: number | null;
+  verdictLabel: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -128,14 +141,18 @@ export class PostgresRepository {
     analysisId: string,
     input: SaveAnalysisResultInput
   ): Promise<Analysis> {
+    const overallScore = input.aiAnalysis
+      ? calculateOverallScore(input.aiAnalysis.visualDesignScore, input.metrics)
+      : null;
     return await prisma.analysis.update({
       where: { id: analysisId },
       data: {
         status: input.status ?? AnalysisStatus.COMPLETED,
         // Overall UIVerdict scoring
         ...(input.aiAnalysis ? {
-          overallScore: input.aiAnalysis.overallVerdict.score,
-          verdictLabel: input.aiAnalysis.overallVerdict.label,
+          visualDesignScore: input.aiAnalysis.visualDesignScore,
+          overallScore,
+          verdictLabel: overallScore === null ? null : resolveVerdictLabel(overallScore),
           qualitativeCritique: input.aiAnalysis.qualitativeCritique,
           strengths: input.aiAnalysis.strengths,
           areasForRefinement: input.aiAnalysis.areasForRefinement,
@@ -166,7 +183,7 @@ export class PostgresRepository {
     const analysis = await prisma.analysis.findFirst({
       where: {
         id: analysisId,
-        status: AnalysisStatus.COMPLETED,
+        status: { in: [AnalysisStatus.COMPLETED, AnalysisStatus.BLOCKED, AnalysisStatus.INCONCLUSIVE] },
         ...('userId' in access ? { userId: access.userId } : { userId: null }),
       },
     });
@@ -175,6 +192,12 @@ export class PostgresRepository {
     return {
       id: analysis.id,
       url: analysis.url,
+      status: analysis.status,
+      visualDesignScore: analysis.visualDesignScore,
+      validationReason: typeof analysis.playwrightDiagnostics === 'object' && analysis.playwrightDiagnostics !== null && 'validationReason' in analysis.playwrightDiagnostics
+        ? String((analysis.playwrightDiagnostics as any).validationReason ?? '') || null : null,
+      overallScore: analysis.overallScore,
+      verdictLabel: analysis.verdictLabel,
       metrics: {
         performance: analysis.performanceScore,
         accessibility: analysis.accessibilityScore,
@@ -187,12 +210,10 @@ export class PostgresRepository {
         cumulativeLayoutShift: analysis.cumulativeLayoutShift ?? '',
         timeToInteractive: analysis.timeToInteractive ?? '',
       },
-      aiStatus: analysis.overallScore === null ? 'UNAVAILABLE' : 'AVAILABLE',
-      aiAnalysis: analysis.overallScore === null ? null : {
-        overallVerdict: {
-          score: analysis.overallScore,
-          label: (analysis.verdictLabel ?? '') as VerdictLabel,
-        },
+      aiStatus: analysis.visualDesignScore === null && analysis.overallScore === null ? 'UNAVAILABLE' : 'AVAILABLE',
+      aiAnalysis: analysis.visualDesignScore === null && analysis.overallScore === null ? null : {
+        visualDesignScore: analysis.visualDesignScore,
+        overallVerdict: analysis.overallScore === null ? null : { score: analysis.overallScore, label: (analysis.verdictLabel ?? '') as VerdictLabel },
         qualitativeCritique: (analysis.qualitativeCritique as string[]) ?? [],
         strengths: (analysis.strengths as string[]) ?? [],
         areasForRefinement: (analysis.areasForRefinement as string[]) ?? [],
@@ -223,6 +244,12 @@ export class PostgresRepository {
     return {
       id: analysis.id,
       url: analysis.url,
+      status: analysis.status,
+      visualDesignScore: analysis.visualDesignScore,
+      validationReason: typeof analysis.playwrightDiagnostics === 'object' && analysis.playwrightDiagnostics !== null && 'validationReason' in analysis.playwrightDiagnostics
+        ? String((analysis.playwrightDiagnostics as any).validationReason ?? '') || null : null,
+      overallScore: analysis.overallScore,
+      verdictLabel: analysis.verdictLabel,
       metrics: {
         performance: analysis.performanceScore,
         accessibility: analysis.accessibilityScore,
@@ -235,12 +262,10 @@ export class PostgresRepository {
         cumulativeLayoutShift: analysis.cumulativeLayoutShift ?? '',
         timeToInteractive: analysis.timeToInteractive ?? '',
       },
-      aiStatus: analysis.overallScore === null ? 'UNAVAILABLE' : 'AVAILABLE',
-      aiAnalysis: analysis.overallScore === null ? null : {
-        overallVerdict: {
-          score: analysis.overallScore ?? 0,
-          label: (analysis.verdictLabel ?? '') as VerdictLabel,
-        },
+      aiStatus: analysis.visualDesignScore === null && analysis.overallScore === null ? 'UNAVAILABLE' : 'AVAILABLE',
+      aiAnalysis: analysis.visualDesignScore === null && analysis.overallScore === null ? null : {
+        visualDesignScore: analysis.visualDesignScore,
+        overallVerdict: analysis.overallScore === null ? null : { score: analysis.overallScore, label: (analysis.verdictLabel ?? '') as VerdictLabel },
         qualitativeCritique: (analysis.qualitativeCritique as string[]) || [],
         strengths: (analysis.strengths as string[]) || [],
         areasForRefinement: (analysis.areasForRefinement as string[]) || [],

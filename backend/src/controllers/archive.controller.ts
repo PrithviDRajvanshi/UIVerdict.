@@ -60,6 +60,10 @@ export const getArchiveAnalyses = async (req: Request, res: Response, next: Next
       where.status = AnalysisStatus.COMPLETED;
     } else if (statusParam === 'FAILED') {
       where.status = AnalysisStatus.FAILED;
+    } else if (statusParam === 'BLOCKED') {
+      where.status = AnalysisStatus.BLOCKED;
+    } else if (statusParam === 'INCONCLUSIVE') {
+      where.status = AnalysisStatus.INCONCLUSIVE;
     } else if (statusParam === 'PENDING' || statusParam === 'PROCESSING') {
       where.status = AnalysisStatus.PROCESSING;
     }
@@ -89,6 +93,8 @@ export const getArchiveAnalyses = async (req: Request, res: Response, next: Next
         mappedStatus = 'COMPLETE';
       } else if (record.status === AnalysisStatus.FAILED) {
         mappedStatus = 'FAILED';
+      } else if (record.status === AnalysisStatus.BLOCKED || record.status === AnalysisStatus.INCONCLUSIVE) {
+        mappedStatus = record.status;
       }
 
       return {
