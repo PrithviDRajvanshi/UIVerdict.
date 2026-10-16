@@ -23,7 +23,10 @@ const startServer = async () => {
 };
 
 const server = startServer().catch((error) => {
-  console.error('Backend startup failed:', error?.message || error);
+  console.error('Backend startup failed:', error);
+  if (error?.cause) {
+    console.error('Underlying cause:', error.cause);
+  }
   process.exit(1);
 });
 
