@@ -5,6 +5,7 @@ import { LighthouseMetrics } from './lighthouse.service';
 import { ScreenshotResult } from './playwright.service';
 import { UI_VERDICT_SYSTEM_PROMPT, generateUserPrompt } from '../prompts/uiVerdict.prompt';
 import { aiAnalysisSchema, AiAnalysis, resolveVerdictLabel } from '../validators/aiAnalysis.validator';
+import { calculateOverallScore } from './scoring.service';
 import fs from 'fs';
 import path from 'path';
 
@@ -20,7 +21,7 @@ const responseSchema = {
     overallVerdict: {
       type: Type.OBJECT,
       properties: {
-        score: { type: Type.NUMBER, description: 'Independent holistic UIVerdict score between 0 and 100 based on UX/UI evaluation and objective evidence' },
+        score: { type: Type.NUMBER, description: 'Screenshot-only qualitative UX/UI score between 0 and 100; exclude Lighthouse metrics' },
         label: {
           type: Type.STRING,
           enum: ['EXCELLENT', 'GOOD', 'SATISFACTORY', 'NEEDS IMPROVEMENT', 'POOR'],
@@ -172,6 +173,7 @@ export class GeminiService {
         model,
         contents,
         config: {
+          temperature: 0,
           responseMimeType: 'application/json',
           responseSchema: responseSchema,
           systemInstruction: UI_VERDICT_SYSTEM_PROMPT,
@@ -207,11 +209,12 @@ export class GeminiService {
 
       const aiResult = validationResult.data;
 
-      // Validate score range 0-100 and normalize verdict label according to documented rubric
-      const rawScore = Number(aiResult.overallVerdict.score);
-      const normalizedScore = Math.max(0, Math.min(100, Math.round(rawScore * 10) / 10));
-      aiResult.overallVerdict.score = normalizedScore;
-      aiResult.overallVerdict.label = resolveVerdictLabel(normalizedScore, aiResult.overallVerdict.label);
+      // Preserve Gemini's screenshot-only score as an input, then calculate the
+      // persisted overall score deterministically from available Lighthouse data.
+      const qualitativeScore = Math.round(aiResult.overallVerdict.score * 10) / 10;
+      const overallScore = calculateOverallScore(qualitativeScore, input.metrics);
+      aiResult.overallVerdict.score = overallScore;
+      aiResult.overallVerdict.label = resolveVerdictLabel(overallScore, aiResult.overallVerdict.label);
 
       console.info(`[Gemini] model=${model} attempt=${attempt}/${maxAttempts} elapsed_ms=${Date.now() - startedAt} status=200 result=success`);
       return aiResult;

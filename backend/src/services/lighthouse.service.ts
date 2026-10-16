@@ -1,6 +1,7 @@
 import * as chromeLauncher from 'chrome-launcher';
 import { chromium } from 'playwright';
 import { ApiError } from '../errors/ApiError';
+import { normalizeLighthouseCategoryScore } from './scoring.service';
 import {
   classifyLighthouseFailure,
   classifyLighthouseResult,
@@ -13,10 +14,10 @@ import {
 } from './browser-diagnostics';
 
 export interface LighthouseMetrics {
-  performance: number;
-  accessibility: number;
-  bestPractices: number;
-  seo: number;
+  performance: number | null;
+  accessibility: number | null;
+  bestPractices: number | null;
+  seo: number | null;
   firstContentfulPaint: string;
   largestContentfulPaint: string;
   speedIndex: string;
@@ -186,9 +187,9 @@ export class LighthouseService {
           : 'Lighthouse audit failed');
       }
 
-      const getScore = (catKey: string): number => {
+      const getScore = (catKey: string): number | null => {
         const cat = categories[catKey];
-        return cat && typeof cat.score === 'number' ? Math.round(cat.score * 100) : 0;
+        return normalizeLighthouseCategoryScore(cat?.score);
       };
 
       const getDisplayValue = (auditKey: string): string => {

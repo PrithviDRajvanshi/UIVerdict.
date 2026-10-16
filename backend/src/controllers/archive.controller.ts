@@ -95,7 +95,7 @@ export const getArchiveAnalyses = async (req: Request, res: Response, next: Next
         id: record.id,
         targetUrl: record.url,
         date: record.createdAt.toISOString().slice(0, 10),
-        score: record.overallScore !== null && record.overallScore !== undefined ? Math.round(record.overallScore) : 0,
+        score: record.overallScore !== null && record.overallScore !== undefined ? Math.round(record.overallScore) : null,
         status: mappedStatus,
         createdAt: record.createdAt,
       };

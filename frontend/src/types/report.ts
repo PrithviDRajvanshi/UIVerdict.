@@ -1,13 +1,13 @@
 export interface ReportMetrics {
-  performance: number;
-  accessibility: number;
-  bestPractices: number;
-  seoStructure: number;
+  performance: number | null;
+  accessibility: number | null;
+  bestPractices: number | null;
+  seoStructure: number | null;
   firstContentfulPaint?: string;
   largestContentfulPaint?: string;
   speedIndex?: string;
   totalBlockingTime?: string;
-  cumulativeLayoutShift?: number;
+  cumulativeLayoutShift?: number | null;
   timeToInteractive?: string;
 }
 
