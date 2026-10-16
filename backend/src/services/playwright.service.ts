@@ -10,6 +10,7 @@ import {
   sanitizeDiagnosticUrl,
   sanitizePlaywrightDiagnostics,
 } from './browser-diagnostics';
+import { TargetPageValidationError, validateTargetPage } from './target-page-validation';
 
 export interface ScreenshotResult {
   url: string;
@@ -99,6 +100,11 @@ export class PlaywrightService {
         visibleElementCount: [...(document.body?.querySelectorAll('*') ?? [])].filter(visible).length,
         imageCount: document.images.length,
         buttonCount: document.querySelectorAll('button,[role="button"]').length,
+        bodyText: document.body?.innerText.slice(0, 12000) ?? '',
+        hasBody: Boolean(document.body),
+        hasCanvasOrSvg: Boolean(document.querySelector('canvas,svg')),
+        hasLoginForm: Boolean(document.querySelector('input[type="password"],form[action*="login" i],form[action*="signin" i]')),
+        challengeMarkers: [...document.querySelectorAll('[id*="challenge" i],[class*="challenge" i],[id*="captcha" i],[class*="captcha" i]')].slice(0, 8).map((node) => `${node.tagName.toLowerCase()}#${(node as HTMLElement).id}`),
       };
     });
   }
@@ -194,10 +200,16 @@ export class PlaywrightService {
           url: sanitizeDiagnosticUrl(response.url()),
           status: response.status(),
         });
-        if (response.request().isNavigationRequest()) appendBounded(diagnosticEvents.navigationResponses, {
-          url: sanitizeDiagnosticUrl(response.url()),
-          status: response.status(),
-        });
+        if (response.request().isNavigationRequest()) {
+          try {
+            if (response.frame() === page.mainFrame()) appendBounded(diagnosticEvents.navigationResponses, {
+              url: sanitizeDiagnosticUrl(response.url()),
+              status: response.status(),
+            });
+          } catch {
+            // Ignore detached subframes; main-frame validation remains authoritative.
+          }
+        }
       });
 
       const navigationStartedAt = Date.now();
@@ -246,7 +258,7 @@ export class PlaywrightService {
               navigationError,
               browserEvents: diagnosticEvents,
             }));
-            throw new ApiError(504, `Navigation timeout while loading URL: ${targetUrl}`);
+            throw new TargetPageValidationError({ status: 'INCONCLUSIVE', reasonCode: 'BROWSER_NETWORK_ERROR', reason: 'Navigation timed out before the intended page could be evaluated.' });
           }
         } else if (
           errMessage.includes('net::ERR_CONNECTION_REFUSED') ||
@@ -257,19 +269,19 @@ export class PlaywrightService {
         ) {
           const pageState = await this.readPageDiagnostics(page).catch(() => null);
           if (onDiagnostics) await onDiagnostics(sanitizePlaywrightDiagnostics({ requestedUrl: targetUrl, page: pageState, outcome: 'NAVIGATION_FAILED', navigationDurationMs, navigationTimedOut, navigationError, browserEvents: diagnosticEvents }));
-          throw new ApiError(502, `Connection failed while connecting to URL: ${targetUrl}`);
+          throw new TargetPageValidationError({ status: 'INCONCLUSIVE', reasonCode: 'BROWSER_NETWORK_ERROR', reason: 'The browser could not connect to the target page.' });
         } else if (errMessage.includes('net::ERR_NAME_NOT_RESOLVED') || errMessage.includes('ENOTFOUND')) {
           const pageState = await this.readPageDiagnostics(page).catch(() => null);
           if (onDiagnostics) await onDiagnostics(sanitizePlaywrightDiagnostics({ requestedUrl: targetUrl, page: pageState, outcome: 'NAVIGATION_FAILED', navigationDurationMs, navigationTimedOut, navigationError, browserEvents: diagnosticEvents }));
-          throw new ApiError(502, `DNS failure or domain not found for URL: ${targetUrl}`);
+          throw new TargetPageValidationError({ status: 'INCONCLUSIVE', reasonCode: 'BROWSER_NETWORK_ERROR', reason: 'The target hostname could not be resolved.' });
         } else if (errMessage.includes('net::ERR_SSL') || errMessage.includes('CERT')) {
           const pageState = await this.readPageDiagnostics(page).catch(() => null);
           if (onDiagnostics) await onDiagnostics(sanitizePlaywrightDiagnostics({ requestedUrl: targetUrl, page: pageState, outcome: 'NAVIGATION_FAILED', navigationDurationMs, navigationTimedOut, navigationError, browserEvents: diagnosticEvents }));
-          throw new ApiError(502, `HTTPS/SSL error while connecting to URL: ${targetUrl}`);
+          throw new TargetPageValidationError({ status: 'INCONCLUSIVE', reasonCode: 'BROWSER_NETWORK_ERROR', reason: 'The browser could not establish a secure connection to the target.' });
         } else {
           const pageState = await this.readPageDiagnostics(page).catch(() => null);
           if (onDiagnostics) await onDiagnostics(sanitizePlaywrightDiagnostics({ requestedUrl: targetUrl, page: pageState, outcome: 'NAVIGATION_FAILED', navigationDurationMs, navigationTimedOut, navigationError, browserEvents: diagnosticEvents }));
-          throw new ApiError(502, `Failed to navigate to URL: ${targetUrl}`);
+          throw new TargetPageValidationError({ status: 'INCONCLUSIVE', reasonCode: 'BROWSER_NETWORK_ERROR', reason: 'Navigation failed before the intended page could be evaluated.' });
         }
       }
 
@@ -292,6 +304,39 @@ export class PlaywrightService {
         pageDiagnostics = await this.readPageDiagnostics(page);
       } catch (error: any) {
         pageDiagnostics = { collectionError: sanitizeDiagnosticMessage(error?.message || error) };
+      }
+      const latestNavigation = diagnosticEvents.navigationResponses[diagnosticEvents.navigationResponses.length - 1];
+      const targetValidation = validateTargetPage({
+        httpStatus: latestNavigation?.status ?? null,
+        finalUrl: String(pageDiagnostics?.finalUrl ?? page.url()),
+        title: String(pageDiagnostics?.title ?? ''),
+        bodyText: String(pageDiagnostics?.bodyText ?? ''),
+        readyState: String(pageDiagnostics?.readyState ?? ''),
+        visibleElementCount: Number(pageDiagnostics?.visibleElementCount ?? 0),
+        hasBody: Boolean(pageDiagnostics?.hasBody),
+        hasCanvasOrSvg: Boolean(pageDiagnostics?.hasCanvasOrSvg),
+        hasLoginForm: Boolean(pageDiagnostics?.hasLoginForm),
+        challengeMarkers: Array.isArray(pageDiagnostics?.challengeMarkers) ? pageDiagnostics.challengeMarkers as string[] : [],
+      });
+      if (targetValidation.status !== 'VALID') {
+        const validationDiagnostics = sanitizePlaywrightDiagnostics({
+          requestedUrl: targetUrl,
+          page: pageDiagnostics,
+          outcome: targetValidation.status,
+          validationReasonCode: targetValidation.reasonCode,
+          validationReason: targetValidation.reason,
+          navigationDurationMs,
+          navigationTimedOut,
+          navigationError,
+          browserEvents: diagnosticEvents,
+        });
+        if (onDiagnostics) await onDiagnostics(validationDiagnostics);
+        console.warn('[Playwright] Target validation rejected evaluation:', {
+          status: targetValidation.status,
+          reasonCode: targetValidation.reasonCode,
+          finalUrl: sanitizeDiagnosticUrl(String(pageDiagnostics?.finalUrl ?? page.url())),
+        });
+        throw new TargetPageValidationError(targetValidation);
       }
       const screenshotCaptureStartedAt = Date.now();
       const baseDiagnostics = {

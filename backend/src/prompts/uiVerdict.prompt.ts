@@ -8,12 +8,12 @@ EVIDENCE RULES:
 - Do not penalize a site for lacking features its purpose does not require. Minimalism alone is not a strength.
 - Make recommendations actionable and tie each to visible or measured evidence.
 
-Evaluate hierarchy, layout, spacing, typography, color, navigation, content scannability, visible affordances, consistency, perceived usability, and visible accessibility concerns.
+Evaluate hierarchy, layout, spacing, typography, color, navigation, content scannability, visible affordances, consistency, and perceived usability. Comment only on visible legibility and contrast cues; do not claim assistive-technology behavior or accessibility testing.
 
-QUALITATIVE SCORE:
-Return a 0-100 score for the screenshot-based qualitative UI/UX evaluation only. Lighthouse values must not change this score. The backend combines this score with available Lighthouse category scores using the geometric mean: (qualitative score × each available category score)^(1 / number of included scores). If any observed dimension is below 40, the final score is capped at 59.9 so a critical weakness cannot be hidden by strong results elsewhere. Missing categories are excluded, never treated as zero. The backend derives the final label from the combined score.
+VISUAL DESIGN SCORE:
+Return visualDesignScore from 0 to 100 based only on the visible screenshot. Score hierarchy, layout, spacing, typography, color, consistency and visual coherence. Assess responsive behavior only when the screenshot supports it. Technical measurements do not affect this score. The backend separately derives an overall score only when the visual score and all four Lighthouse category scores are present.
 
-Return only JSON matching the supplied schema. Include specific critique, evidence-based strengths, and prioritized actionable refinements.`;
+Return only JSON matching the supplied schema, with visualDesignScore, specific critique, evidence-based strengths, and prioritized actionable refinements.`;
 
 export function generateUserPrompt(data: {
   url: string;

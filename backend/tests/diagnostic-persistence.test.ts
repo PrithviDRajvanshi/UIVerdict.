@@ -4,15 +4,19 @@ import path from 'path';
 import { prisma } from '../src/config/postgres';
 import { postgresRepository } from '../src/repositories/postgres/postgres.repository';
 import { AnalysisStatus } from '@prisma/client';
+import { calculateOverallScore } from '../src/services/scoring.service';
 
 async function run() {
   const schema = fs.readFileSync(path.resolve(process.cwd(), 'prisma', 'schema.prisma'), 'utf8');
   const migration = fs.readFileSync(path.resolve(process.cwd(), 'prisma', 'migrations', '20261013140000_add_analysis_diagnostics', 'migration.sql'), 'utf8');
+  const scoringMigration = fs.readFileSync(path.resolve(process.cwd(), 'prisma', 'migrations', '20261016120000_target_validation_visual_score', 'migration.sql'), 'utf8');
   for (const column of ['playwrightDiagnostics', 'lighthouseDiagnostics', 'screenshotArtifactName', 'screenshotSha256']) {
     assert.ok(schema.includes(`${column} `), `Prisma schema includes ${column}`);
     assert.ok(migration.includes(`ADD COLUMN "${column}"`), `additive migration includes ${column}`);
   }
   assert.ok(!/DROP\s+COLUMN/i.test(migration), 'diagnostic migration must not remove existing columns');
+  assert.ok(scoringMigration.includes("ADD VALUE 'BLOCKED'") && scoringMigration.includes("ADD VALUE 'INCONCLUSIVE'"));
+  assert.ok(scoringMigration.includes('ADD COLUMN "visualDesignScore"'));
 
   const originalUpdate = prisma.analysis.update;
   const calls: any[] = [];
@@ -27,7 +31,7 @@ async function run() {
     totalBlockingTime: '4800 ms', cumulativeLayoutShift: '0', timeToInteractive: 'N/A',
   };
   const aiAnalysis = {
-    overallVerdict: { score: 38.5, label: 'POOR' as const },
+    visualDesignScore: 38.5,
     qualitativeCritique: ['Critique associated with this run'],
     strengths: ['Strength'],
     areasForRefinement: ['Refinement'],
@@ -84,7 +88,8 @@ async function run() {
     assert.strictEqual(calls[2].data.screenshotSha256, 'b'.repeat(64));
     const result = calls[3].data;
     assert.strictEqual(result.performanceScore, metrics.performance);
-    assert.strictEqual(result.overallScore, aiAnalysis.overallVerdict.score);
+    assert.strictEqual(result.visualDesignScore, aiAnalysis.visualDesignScore);
+    assert.strictEqual(result.overallScore, calculateOverallScore(aiAnalysis.visualDesignScore, metrics));
     assert.deepStrictEqual(result.qualitativeCritique, aiAnalysis.qualitativeCritique);
     assert.strictEqual(result.screenshotArtifactName, 'uiverdict-diagnostic-test.png');
     assert.strictEqual(result.screenshotSha256, 'a'.repeat(64));

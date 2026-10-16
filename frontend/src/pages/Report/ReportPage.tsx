@@ -8,6 +8,7 @@ import { QualitativeCritique } from '../../components/report/QualitativeCritique
 import { StrengthsRefinements } from '../../components/report/StrengthsRefinements';
 import { StatisticsChart } from '../../components/report/StatisticsChart';
 import { useAuth } from '../../contexts/AuthContext';
+import { getReportPresentation } from '../../services/report-presentation.js';
 
 export const ReportPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -67,6 +68,8 @@ export const ReportPage: React.FC = () => {
     );
   }
 
+  const presentation = getReportPresentation(report.status, report.aiStatus);
+
   return (
     <main className="max-w-container-max mx-auto px-margin-desktop py-stack-lg flex flex-col gap-stack-lg">
       {report.url && (
@@ -76,7 +79,7 @@ export const ReportPage: React.FC = () => {
             <span className="text-primary font-mono-data truncate">{report.url}</span>
           </div>
           <span className="text-[#80DEEA] text-[10px] uppercase border border-[#2a2a2a] px-2 py-0.5 whitespace-nowrap">
-            LIVE ANALYZED
+            {presentation.validated ? 'TARGET VALIDATED' : report.status}
           </span>
         </div>
       )}
@@ -88,7 +91,17 @@ export const ReportPage: React.FC = () => {
         latency={report.latency}
       />
 
-      {report.aiStatus === 'UNAVAILABLE' && (
+      {report.status === 'BLOCKED' || report.status === 'INCONCLUSIVE' ? (
+        <div role="status" className="border border-amber-700 bg-amber-950/40 p-4 font-mono-data text-sm text-amber-200">
+          <strong>{report.status === 'BLOCKED' ? 'TARGET ACCESS BLOCKED' : 'EVALUATION INCONCLUSIVE'}.</strong>{' '}
+          {report.validationReason ?? presentation.targetMessage}
+          {presentation.retryAvailable && report.url && <div className="mt-3"><Link className="underline" to={`/analyze?url=${encodeURIComponent(report.url)}`}>Retry analysis</Link></div>}
+        </div>
+      ) : report.status === 'FAILED' ? (
+        <div role="status" className="border border-red-800 bg-red-950/40 p-4 font-mono-data text-sm text-red-200">This analysis failed before a reliable report could be completed.</div>
+      ) : null}
+
+      {presentation.aiUnavailable && (
         <div role="status" className="border border-amber-700 bg-amber-950/40 p-4 font-mono-data text-sm text-amber-200">
           AI feedback is unavailable for this report. The scores and Web Vitals below come from Lighthouse; no AI critique or overall score was generated.
         </div>
@@ -97,13 +110,18 @@ export const ReportPage: React.FC = () => {
       <div className="grid grid-cols-1 md:grid-cols-12 gap-gutter bg-[#2a2a2a] p-gutter">
         <ScorePanel
           overallScore={report.overallScore}
+          visualDesignScore={report.visualDesignScore}
           verdictStatus={report.verdictStatus}
           metrics={report.metrics}
           isAuthenticated={isAuthenticated}
         />
 
         <div className="md:col-span-8 flex flex-col gap-gutter bg-[#2a2a2a] relative">
-          {isAuthenticated && report.aiStatus === 'AVAILABLE' ? (
+          {report.status !== 'COMPLETED' ? (
+            <div className="border border-[#2a2a2a] bg-[#151515] p-8 text-center font-mono-data text-sm text-[#bbbbbb]">
+              No visual evaluation or technical scores are available for this target-page status.
+            </div>
+          ) : isAuthenticated && report.aiStatus === 'AVAILABLE' ? (
             <>
               <QualitativeCritique critique={report.qualitativeCritique} />
               <StrengthsRefinements strengths={report.strengths} refinements={report.refinements} />
@@ -146,8 +164,12 @@ export const ReportPage: React.FC = () => {
         </div>
       </div>
 
-      {isAuthenticated ? (
+      {isAuthenticated && report.status === 'COMPLETED' ? (
         <StatisticsChart metrics={report.metrics} />
+      ) : report.status !== 'COMPLETED' ? (
+        <div className="border border-[#2a2a2a] bg-[#151515] p-5 font-mono-data text-sm text-[#888888]">
+          Lighthouse telemetry is unavailable because the intended target page was not validated.
+        </div>
       ) : (
         <div className="border border-[#2a2a2a] bg-[#151515] p-8 flex flex-col items-center justify-center text-center min-h-[220px]">
           <span className="material-symbols-outlined text-3xl text-[#888888] mb-2">analytics</span>

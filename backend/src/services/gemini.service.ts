@@ -4,8 +4,7 @@ import { ApiError } from '../errors/ApiError';
 import { LighthouseMetrics } from './lighthouse.service';
 import { ScreenshotResult } from './playwright.service';
 import { UI_VERDICT_SYSTEM_PROMPT, generateUserPrompt } from '../prompts/uiVerdict.prompt';
-import { aiAnalysisSchema, AiAnalysis, resolveVerdictLabel } from '../validators/aiAnalysis.validator';
-import { calculateOverallScore } from './scoring.service';
+import { aiAnalysisSchema, AiAnalysis } from '../validators/aiAnalysis.validator';
 import fs from 'fs';
 import path from 'path';
 
@@ -18,18 +17,7 @@ export interface GeminiInputData {
 const responseSchema = {
   type: Type.OBJECT,
   properties: {
-    overallVerdict: {
-      type: Type.OBJECT,
-      properties: {
-        score: { type: Type.NUMBER, description: 'Screenshot-only qualitative UX/UI score between 0 and 100; exclude Lighthouse metrics' },
-        label: {
-          type: Type.STRING,
-          enum: ['EXCELLENT', 'GOOD', 'SATISFACTORY', 'NEEDS IMPROVEMENT', 'POOR'],
-          description: 'Verdict label strictly aligned with the UIVerdict score rubric',
-        },
-      },
-      required: ['score', 'label'],
-    },
+    visualDesignScore: { type: Type.NUMBER, description: 'Screenshot-only visual design score between 0 and 100; exclude Lighthouse metrics and interaction claims' },
     qualitativeCritique: {
       type: Type.ARRAY,
       items: { type: Type.STRING },
@@ -46,7 +34,7 @@ const responseSchema = {
       description: 'List of actionable UI/UX areas for refinement',
     },
   },
-  required: ['overallVerdict', 'qualitativeCritique', 'strengths', 'areasForRefinement'],
+  required: ['visualDesignScore', 'qualitativeCritique', 'strengths', 'areasForRefinement'],
 };
 
 export class GeminiService {
@@ -209,12 +197,7 @@ export class GeminiService {
 
       const aiResult = validationResult.data;
 
-      // Preserve Gemini's screenshot-only score as an input, then calculate the
-      // persisted overall score deterministically from available Lighthouse data.
-      const qualitativeScore = Math.round(aiResult.overallVerdict.score * 10) / 10;
-      const overallScore = calculateOverallScore(qualitativeScore, input.metrics);
-      aiResult.overallVerdict.score = overallScore;
-      aiResult.overallVerdict.label = resolveVerdictLabel(overallScore, aiResult.overallVerdict.label);
+      aiResult.visualDesignScore = Math.round(aiResult.visualDesignScore * 10) / 10;
 
       console.info(`[Gemini] model=${model} attempt=${attempt}/${maxAttempts} elapsed_ms=${Date.now() - startedAt} status=200 result=success`);
       return aiResult;

@@ -5,6 +5,10 @@ import { AiAnalysis } from '../validators/aiAnalysis.validator';
 import { postgresRepository } from '../repositories/postgres/postgres.repository';
 import { AnalysisStatus } from '@prisma/client';
 import { sanitizeDiagnosticMessage, sanitizeDiagnosticUrl } from './browser-diagnostics';
+import { TargetPageValidationError } from './target-page-validation';
+import { calculateOverallScore } from './scoring.service';
+import { resolveVerdictLabel } from '../validators/aiAnalysis.validator';
+import { PlaywrightDiagnosticMetadata } from './browser-diagnostics';
 
 export interface AnalysisData {
   id: string;
@@ -12,18 +16,24 @@ export interface AnalysisData {
   metrics: LighthouseMetrics;
   aiAnalysis: AiAnalysis | null;
   aiStatus: 'AVAILABLE' | 'UNAVAILABLE';
+  overallScore: number | null;
+  verdictLabel: string | null;
+  visualDesignScore: number | null;
+  targetValidationStatus: 'VALID' | 'BLOCKED' | 'INCONCLUSIVE';
 }
 
 export interface AnalysisResponse {
   status: string;
   message: string;
   data: AnalysisData;
+  [key: string]: unknown;
 }
 
 export class AnalysisService {
   public async analyzeUrl(url: string, userId?: string): Promise<AnalysisResponse> {
     let analysisId: string | null = null;
     let screenshotData: ScreenshotResult | null = null;
+    const latestPlaywrightDiagnostics: { current: PlaywrightDiagnosticMetadata | null } = { current: null };
 
     try {
       // 1. Create relational analysis record in PostgreSQL (status: PROCESSING)
@@ -33,7 +43,7 @@ export class AnalysisService {
 
       // 2. Capture Playwright full page screenshot
       screenshotData = await playwrightService.captureScreenshot(url, analysisId, (diagnostics) =>
-        postgresRepository.updatePlaywrightDiagnostics(analysis.id, diagnostics).then(() => undefined));
+        (latestPlaywrightDiagnostics.current = diagnostics, postgresRepository.updatePlaywrightDiagnostics(analysis.id, diagnostics).then(() => undefined)));
       await postgresRepository.updateScreenshotIdentity(analysis.id, screenshotData.filename, screenshotData.sha256);
       console.log(`[AnalysisService] Screenshot capture completed: ${screenshotData.filename} (${screenshotData.path})`);
 
@@ -46,7 +56,7 @@ export class AnalysisService {
       let aiAnalysis: AiAnalysis | null = null;
       try {
         aiAnalysis = await geminiService.generateAnalysis({ url, metrics, screenshot: screenshotData });
-        console.log(`[AnalysisService] Gemini AI analysis completed for URL: ${sanitizeDiagnosticUrl(url)} (Score: ${aiAnalysis.overallVerdict.score})`);
+        console.log(`[AnalysisService] Gemini AI visual assessment completed for URL: ${sanitizeDiagnosticUrl(url)} (Visual design score: ${aiAnalysis.visualDesignScore})`);
       } catch (aiError: any) {
         console.warn(`[AnalysisService] AI feedback unavailable; preserving Lighthouse report: ${sanitizeDiagnosticMessage(aiError?.message || 'unknown error')}`);
       }
@@ -60,6 +70,7 @@ export class AnalysisService {
         screenshotArtifactName: screenshotData.filename,
         screenshotSha256: screenshotData.sha256,
       });
+      const overallScore = aiAnalysis ? calculateOverallScore(aiAnalysis.visualDesignScore, metrics) : null;
       console.log(`[AnalysisService] PostgreSQL persistence complete. Analysis status marked as COMPLETED.`);
 
       // 6. Final response construction and return
@@ -72,10 +83,41 @@ export class AnalysisService {
           metrics,
           aiAnalysis,
           aiStatus: aiAnalysis ? 'AVAILABLE' : 'UNAVAILABLE',
+          overallScore,
+          verdictLabel: overallScore === null ? null : resolveVerdictLabel(overallScore),
+          visualDesignScore: aiAnalysis?.visualDesignScore ?? null,
+          targetValidationStatus: 'VALID',
         },
       };
     } catch (error: any) {
       console.error('Analysis pipeline error:', sanitizeDiagnosticMessage(error?.message || error));
+      if (error instanceof TargetPageValidationError && analysisId) {
+        const status = error.validation.status === 'BLOCKED' ? AnalysisStatus.BLOCKED : AnalysisStatus.INCONCLUSIVE;
+        if (latestPlaywrightDiagnostics.current) {
+          await postgresRepository.updatePlaywrightDiagnostics(analysisId, {
+            ...latestPlaywrightDiagnostics.current,
+            outcome: error.validation.status,
+            validationReasonCode: error.validation.reasonCode,
+            validationReason: error.validation.reason,
+          });
+        }
+        await postgresRepository.updateAnalysisStatus(analysisId, status);
+        return {
+          status: error.validation.status.toLowerCase(),
+          message: error.validation.reason ?? 'The target page could not be evaluated.',
+          data: {
+            id: analysisId,
+            url,
+            metrics: { performance: null, accessibility: null, bestPractices: null, seo: null, firstContentfulPaint: '', largestContentfulPaint: '', speedIndex: '', totalBlockingTime: '', cumulativeLayoutShift: '', timeToInteractive: '' },
+            aiAnalysis: null,
+            aiStatus: 'UNAVAILABLE',
+            overallScore: null,
+            verdictLabel: null,
+            visualDesignScore: null,
+            targetValidationStatus: error.validation.status,
+          },
+        };
+      }
       if (analysisId) {
         try {
           await postgresRepository.updateAnalysisStatus(analysisId, AnalysisStatus.FAILED);

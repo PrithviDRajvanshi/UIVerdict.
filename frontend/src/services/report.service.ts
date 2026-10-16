@@ -8,6 +8,11 @@ interface SavedReportResponse {
     url: string;
     createdAt: string;
     aiStatus: 'AVAILABLE' | 'UNAVAILABLE';
+    status: ReportData['status'];
+    visualDesignScore: number | null;
+    validationReason: string | null;
+    overallScore: number | null;
+    verdictLabel: string | null;
     metrics: {
       performance: number | null;
       accessibility: number | null;
@@ -21,7 +26,8 @@ interface SavedReportResponse {
       timeToInteractive: string;
     };
     aiAnalysis: {
-      overallVerdict: { score: number; label: string };
+      visualDesignScore: number | null;
+      overallVerdict: { score: number; label: string } | null;
       qualitativeCritique: string[];
       strengths: string[];
       areasForRefinement: string[];
@@ -45,9 +51,12 @@ export async function fetchReportById(id: string): Promise<ReportData> {
     algorithm: 'UIVERDICT // COMPLETED ANALYSIS',
     timestamp: new Date(saved.createdAt).toISOString(),
     latency: '—',
-    overallScore: saved.aiAnalysis?.overallVerdict.score ?? null,
-    verdictStatus: saved.aiAnalysis?.overallVerdict.label ?? 'AI UNAVAILABLE',
+    overallScore: saved.overallScore,
+    verdictStatus: saved.verdictLabel ?? 'OVERALL UNAVAILABLE',
     aiStatus: saved.aiStatus,
+    status: saved.status,
+    visualDesignScore: saved.visualDesignScore,
+    validationReason: saved.validationReason,
     metrics: {
       performance: saved.metrics.performance,
       accessibility: saved.metrics.accessibility,

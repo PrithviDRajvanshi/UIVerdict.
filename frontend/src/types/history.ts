@@ -3,5 +3,5 @@ export interface HistoryItem {
   date: string;
   targetUrl: string;
   score: number | null;
-  status: 'COMPLETE' | 'FAILED' | 'PENDING';
+  status: 'COMPLETE' | 'FAILED' | 'PENDING' | 'BLOCKED' | 'INCONCLUSIVE';
 }

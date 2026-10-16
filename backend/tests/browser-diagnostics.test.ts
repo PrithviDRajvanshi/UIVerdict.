@@ -62,7 +62,7 @@ async function run() {
       response.writeHead(200, { 'Content-Type': 'text/css' }).end('main { display: block; }');
       return;
     }
-    response.writeHead(404, { 'Content-Type': 'text/html' }).end(`<!doctype html><title>Diagnostic test</title><link rel="stylesheet" href="/app.css"><body><main></main><img src="/broken-image.png"><button>Go</button><script src="/app.js"></script><script>console.error('token=do-not-log'); setTimeout(() => { throw new Error('page failure'); }, 0);</script></body>`);
+    response.writeHead(request.url?.startsWith('/test') ? 200 : 404, { 'Content-Type': 'text/html' }).end(`<!doctype html><title>Diagnostic test</title><link rel="stylesheet" href="/app.css"><link rel="stylesheet" href="/missing.css"><body><main></main><img src="/broken-image.png"><button>Go</button><script src="/app.js"></script><script>console.error('token=do-not-log'); setTimeout(() => { throw new Error('page failure'); }, 0);</script></body>`);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
@@ -98,7 +98,7 @@ async function run() {
     assert.ok(diagnostic.browserEvents.pageErrors.length > 0);
     assert.ok(diagnostic.browserEvents.failedRequests.some((event: any) => event.url.endsWith('/broken-image.png')));
     assert.ok(diagnostic.browserEvents.httpErrorResponses.some((event: any) => event.status === 404));
-    assert.ok(diagnostic.browserEvents.navigationResponses.some((event: any) => event.status === 404));
+    assert.ok(diagnostic.browserEvents.navigationResponses.some((event: any) => event.status === 200));
     assert.ok(diagnostic.browserEvents.mainFrameNavigations.includes(diagnostic.finalUrl));
     assert.ok(!JSON.stringify(diagnostic).includes('secret'));
     assert.ok(logs.some((entry) => entry.label === '[Playwright] Screenshot timing:'));

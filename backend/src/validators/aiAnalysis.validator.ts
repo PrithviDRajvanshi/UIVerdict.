@@ -9,17 +9,17 @@ export const verdictLabelSchema = z.enum([
 ]);
 
 export const aiAnalysisSchema = z.object({
-  overallVerdict: z.object({
-    score: z.number().min(0).max(100),
-    label: verdictLabelSchema,
-  }),
+  visualDesignScore: z.number().min(0).max(100),
   qualitativeCritique: z.array(z.string().min(1)).min(1),
   strengths: z.array(z.string().min(1)).min(1),
   areasForRefinement: z.array(z.string().min(1)).min(1),
 });
 
-export type AiAnalysis = z.infer<typeof aiAnalysisSchema>;
 export type VerdictLabel = z.infer<typeof verdictLabelSchema>;
+export type AiAnalysis = z.infer<typeof aiAnalysisSchema> & {
+  /** Legacy report compatibility; new records derive this server-side. */
+  overallVerdict?: { score: number; label: VerdictLabel } | null;
+};
 
 export const VERDICT_THRESHOLDS = {
   POOR: 0,

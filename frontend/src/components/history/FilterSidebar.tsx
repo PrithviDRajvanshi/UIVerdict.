@@ -22,7 +22,7 @@ export const FilterSidebar: React.FC<FilterSidebarProps> = ({
           Status Filters
         </div>
         <div className="flex flex-wrap gap-2">
-          {['ALL', 'COMPLETE', 'FAILED', 'PENDING'].map((st) => (
+          {['ALL', 'COMPLETE', 'BLOCKED', 'INCONCLUSIVE', 'FAILED', 'PENDING'].map((st) => (
             <button
               key={st}
               onClick={() => onSelectStatus(st)}

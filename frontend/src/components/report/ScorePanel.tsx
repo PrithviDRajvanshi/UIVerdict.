@@ -4,6 +4,7 @@ import { ReportMetrics } from '../../types/report';
 
 interface ScorePanelProps {
   overallScore: number | null;
+  visualDesignScore: number | null;
   verdictStatus: string;
   metrics: ReportMetrics;
   isAuthenticated?: boolean;
@@ -11,6 +12,7 @@ interface ScorePanelProps {
 
 export const ScorePanel: React.FC<ScorePanelProps> = ({
   overallScore,
+  visualDesignScore,
   verdictStatus,
   metrics,
   isAuthenticated = true,
@@ -26,7 +28,7 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
   return (
     <div className="md:col-span-4 bg-[#151515] border border-[#2a2a2a] flex flex-col h-full">
       <div className="border-b border-[#2a2a2a] p-4 flex justify-between items-center">
-        <h2 className="font-headline-md text-headline-md uppercase text-primary">Global UIVerdict</h2>
+        <h2 className="font-headline-md text-headline-md uppercase text-primary">Overall Website Score</h2>
         <span className="font-mono-data text-[10px] text-[#80DEEA] uppercase tracking-wider">AI Evaluation</span>
       </div>
       <div className="p-6 flex-grow flex flex-col gap-6">
@@ -38,15 +40,22 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
             <div className="flex flex-col">
               <span className="font-label-sm text-label-sm text-[#888888] uppercase">Verdict</span>
               <span className="font-label-sm text-label-sm text-[#f5f5f5] border border-[#2a2a2a] px-2 py-1 mt-1 uppercase">
-                {verdictStatus}
+              {overallScore === null ? 'UNAVAILABLE' : verdictStatus}
               </span>
             </div>
           </div>
           <p className="font-mono-data text-[11px] text-[#888888] tracking-wide mt-1">
-            {overallScore === null ? 'AI evaluation unavailable; score not generated' : 'AI-powered holistic UX/UI evaluation'}
+            {visualDesignScore === null && overallScore !== null
+              ? 'Legacy saved overall score; historical visual score is unavailable'
+              : overallScore === null
+              ? 'Unavailable until a visual score and all four Lighthouse categories are present'
+              : 'Equal-weight geometric mean of visual and Lighthouse scores'}
           </p>
         </div>
         <hr className="border-[#2a2a2a] border-t-1" />
+        <div className="flex justify-between font-mono-data text-sm text-primary">
+          <span>VISUAL DESIGN</span><span>{visualDesignScore === null ? 'Unavailable' : `${visualDesignScore}/100`}</span>
+        </div>
         {isAuthenticated ? (
           <div className="flex flex-col gap-4">
             <div className="flex flex-col gap-0.5 pb-1">
@@ -54,7 +63,7 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
                 Technical Audit (Lighthouse)
               </span>
               <span className="font-mono-data text-[10px] text-[#777777]">
-                Lighthouse dimensions shown separately and included in overall score
+                Technical measurements; included in overall only when all dimensions are available
               </span>
             </div>
             <div>

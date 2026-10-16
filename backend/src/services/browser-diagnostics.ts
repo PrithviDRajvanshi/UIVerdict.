@@ -2,7 +2,7 @@ export const MAX_DIAGNOSTIC_EVENTS = 20;
 export const MAX_DIAGNOSTIC_MESSAGE_LENGTH = 240;
 export const DIAGNOSTIC_SCHEMA_VERSION = 1;
 
-export type DiagnosticOutcome = 'CAPTURED' | 'NAVIGATION_TIMEOUT_USABLE_STATE' | 'NAVIGATION_FAILED' | 'CAPTURE_FAILED' | 'AUDIT_COMPLETED' | 'AUDIT_FAILED';
+export type DiagnosticOutcome = 'CAPTURED' | 'NAVIGATION_TIMEOUT_USABLE_STATE' | 'NAVIGATION_FAILED' | 'CAPTURE_FAILED' | 'BLOCKED' | 'INCONCLUSIVE' | 'AUDIT_COMPLETED' | 'AUDIT_FAILED';
 export type LighthouseAuditOutcome = 'AUDIT_COMPLETED' | 'NAVIGATION_FAILED' | 'AUDIT_FAILED';
 
 export function classifyLighthouseFailure(error: any, navigationResponseStatus: number | null): LighthouseAuditOutcome {
@@ -84,6 +84,8 @@ export interface PlaywrightDiagnosticMetadata {
   screenshotDurationMs: number | null;
   screenshotCompletedAt: string | null;
   screenshotError: string | null;
+  validationReasonCode?: string | null;
+  validationReason?: string | null;
   mainFrameNavigations: string[];
   navigationResponses: Array<{ url: string; status: number }>;
   httpErrorResponses: Array<{ url: string; status: number }>;
@@ -196,7 +198,7 @@ export function sanitizePlaywrightDiagnostics(input: any): PlaywrightDiagnosticM
   const strings = (value: unknown) => boundedEvents(value, (item) => typeof item === 'string' ? sanitizeDiagnosticMessage(item) : null);
   return {
     version: DIAGNOSTIC_SCHEMA_VERSION,
-    outcome: input?.outcome === 'NAVIGATION_FAILED' || input?.outcome === 'NAVIGATION_TIMEOUT_USABLE_STATE' || input?.outcome === 'CAPTURE_FAILED'
+    outcome: input?.outcome === 'BLOCKED' || input?.outcome === 'INCONCLUSIVE' || input?.outcome === 'NAVIGATION_FAILED' || input?.outcome === 'NAVIGATION_TIMEOUT_USABLE_STATE' || input?.outcome === 'CAPTURE_FAILED'
       ? input.outcome : 'CAPTURED',
     requestedUrl: sanitizeDiagnosticUrl(String(input?.requestedUrl ?? '')),
     finalUrl: typeof page.finalUrl === 'string' ? sanitizeDiagnosticUrl(page.finalUrl) : null,
@@ -214,6 +216,8 @@ export function sanitizePlaywrightDiagnostics(input: any): PlaywrightDiagnosticM
     screenshotDurationMs: safeCount(input?.screenshotDurationMs),
     screenshotCompletedAt: typeof input?.screenshotCompletedAt === 'string' ? input.screenshotCompletedAt.slice(0, 40) : null,
     screenshotError: input?.screenshotError ? sanitizeDiagnosticMessage(input.screenshotError) : null,
+    validationReasonCode: typeof input?.validationReasonCode === 'string' ? input.validationReasonCode.slice(0, 64) : null,
+    validationReason: input?.validationReason ? sanitizeDiagnosticMessage(input.validationReason) : null,
     mainFrameNavigations: boundedEvents(events.mainFrameNavigations, (url) => typeof url === 'string' ? sanitizeDiagnosticUrl(url) : null),
     navigationResponses: safeUrlStatusEvents(events.navigationResponses),
     httpErrorResponses: safeUrlStatusEvents(events.httpErrorResponses),
