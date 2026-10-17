@@ -47,9 +47,11 @@ async function run() {
   pageOrigin = `http://127.0.0.1:${pagePort}`;
   const originalLog = console.log;
   const originalError = console.error;
+  const originalInfo = console.info;
   const logs: Array<{ level: string; args: unknown[] }> = [];
   console.log = ((...args: unknown[]) => { logs.push({ level: 'log', args }); }) as typeof console.log;
   console.error = ((...args: unknown[]) => { logs.push({ level: 'error', args }); }) as typeof console.error;
+  console.info = ((...args: unknown[]) => { logs.push({ level: 'info', args }); }) as typeof console.info;
 
   try {
     const corsDiagnostics: PlaywrightDiagnosticMetadata[] = [];
@@ -79,7 +81,17 @@ async function run() {
     const captureFailureLog = logs.find((entry) => entry.level === 'error' && String(entry.args[0]).includes('Full-page screenshot failed'));
     assert.ok(captureFailureLog && JSON.stringify(captureFailureLog.args).includes('Timeout 500ms exceeded'),
     'the exact sanitized browser exception remains available in server logs');
-    assert.strictEqual((captureFailureLog?.args[1] as any)?.pageClosed, false, 'the page remains open while screenshot capture times out');
+    const captureFailure = captureFailureLog?.args[1] as Record<string, any>;
+    assert.strictEqual(captureFailure.pageClosed, false, 'the page remains open while screenshot capture times out');
+    assert.strictEqual(captureFailure.failureClass, 'TIMEOUT');
+    assert.strictEqual(captureFailure.stage, 'browser_capture');
+    assert.match(captureFailure.message, /Timeout 500ms exceeded/);
+    assert.ok(captureFailure.errorName.length > 0, 'failure log includes the error name');
+    assert.ok(captureFailure.errorCode.length > 0, 'failure log includes the error code');
+    assert.ok(captureFailure.elapsedMs > 0, 'failure log includes elapsed capture time');
+    assert.ok(!Object.hasOwn(captureFailure, 'stack'), 'failure log omits the raw exception stack');
+    assert.ok(!JSON.stringify(captureFailure).includes('private'), 'failure log does not expose the URL query secret');
+    assert.ok(logs.some((entry) => entry.level === 'info' && String(entry.args[0]).includes('Full-page screenshot capture started')));
     assert.ok((diagnostic?.screenshotDurationMs ?? 0) > 0, 'failed capture duration is retained in diagnostics');
     assert.ok(!JSON.stringify(diagnostic).includes('private'), 'diagnostics continue to redact query strings');
     const screenshotDir = require('path').resolve(process.cwd(), 'temp', 'screenshots');
@@ -88,6 +100,7 @@ async function run() {
   } finally {
     console.log = originalLog;
     console.error = originalError;
+    console.info = originalInfo;
     await close(pageServer);
     await close(assetServer);
   }
