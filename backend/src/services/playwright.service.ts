@@ -23,6 +23,30 @@ export type PlaywrightDiagnosticsCallback = (diagnostics: PlaywrightDiagnosticMe
 
 export const DEFAULT_FULL_PAGE_SCREENSHOT_TIMEOUT_MS = 60_000;
 
+function logCaptureStage(
+  stage: string,
+  status: 'started' | 'succeeded' | 'failed',
+  targetUrl: string,
+  startedAt: number,
+  error?: unknown,
+): void {
+  const details: Record<string, unknown> = {
+    stage,
+    status,
+    requestedUrl: sanitizeDiagnosticUrl(targetUrl),
+    elapsedMs: Date.now() - startedAt,
+  };
+  if (error !== undefined) {
+    const captureError = error as any;
+    details.errorName = sanitizeDiagnosticMessage(captureError?.name || 'Error');
+    details.errorCode = sanitizeDiagnosticMessage(captureError?.code || 'unknown');
+    details.message = sanitizeDiagnosticMessage(captureError?.message || error);
+  }
+  const label = `[Playwright] Capture stage ${status}:`;
+  if (status === 'failed') console.error(label, details);
+  else console.info(label, details);
+}
+
 export class PlaywrightService {
   private tempDir: string;
 
@@ -115,6 +139,18 @@ export class PlaywrightService {
 
   public async captureScreenshot(targetUrl: string, analysisId?: string, onDiagnostics?: PlaywrightDiagnosticsCallback): Promise<ScreenshotResult> {
     let browser: Browser | null = null;
+    const emitDiagnostics = async (stage: string, diagnostics: PlaywrightDiagnosticMetadata): Promise<void> => {
+      if (!onDiagnostics) return;
+      const startedAt = Date.now();
+      logCaptureStage(stage, 'started', targetUrl, startedAt);
+      try {
+        await onDiagnostics(diagnostics);
+        logCaptureStage(stage, 'succeeded', targetUrl, startedAt);
+      } catch (error) {
+        logCaptureStage(stage, 'failed', targetUrl, startedAt, error);
+        throw error;
+      }
+    };
 
     try {
       this.ensureTempDirExists();
@@ -158,14 +194,32 @@ export class PlaywrightService {
           args: launchOptions.args,
         });
 
-        browser = await chromium.launch(launchOptions);
+        const launchStartedAt = Date.now();
+        logCaptureStage('browser_launch', 'started', targetUrl, launchStartedAt);
+        try {
+          browser = await chromium.launch(launchOptions);
+          logCaptureStage('browser_launch', 'succeeded', targetUrl, launchStartedAt);
+        } catch (error) {
+          logCaptureStage('browser_launch', 'failed', targetUrl, launchStartedAt, error);
+          throw error;
+        }
         console.log('[Playwright] Browser launched successfully');
       } catch (error) {
-        console.error('[Playwright] Failed to launch browser instance:', sanitizeDiagnosticMessage((error as any)?.message || error));
+        const launchError = error as any;
+        console.error('[Playwright] Failed to launch browser instance:', {
+          requestedUrl: sanitizeDiagnosticUrl(targetUrl),
+          errorName: sanitizeDiagnosticMessage(launchError?.name || 'Error'),
+          errorCode: sanitizeDiagnosticMessage(launchError?.code || 'unknown'),
+          message: sanitizeDiagnosticMessage(launchError?.message || error),
+        });
         throw new ApiError(500, 'Failed to launch browser instance');
       }
 
-      const context = await browser.newContext({
+      const contextStartedAt = Date.now();
+      logCaptureStage('context_create', 'started', targetUrl, contextStartedAt);
+      let context;
+      try {
+        context = await browser.newContext({
         viewport: { width: 1280, height: 800 },
         ignoreHTTPSErrors: true,
         userAgent:
@@ -177,9 +231,23 @@ export class PlaywrightService {
           'sec-ch-ua-mobile': '?0',
           'sec-ch-ua-platform': '"Windows"',
         },
-      });
+        });
+        logCaptureStage('context_create', 'succeeded', targetUrl, contextStartedAt);
+      } catch (error) {
+        logCaptureStage('context_create', 'failed', targetUrl, contextStartedAt, error);
+        throw error;
+      }
 
-      const page: Page = await context.newPage();
+      const pageStartedAt = Date.now();
+      logCaptureStage('page_create', 'started', targetUrl, pageStartedAt);
+      let page: Page;
+      try {
+        page = await context.newPage();
+        logCaptureStage('page_create', 'succeeded', targetUrl, pageStartedAt);
+      } catch (error) {
+        logCaptureStage('page_create', 'failed', targetUrl, pageStartedAt, error);
+        throw error;
+      }
       const diagnosticEvents = {
         consoleErrors: [] as string[],
         pageErrors: [] as string[],
@@ -216,19 +284,35 @@ export class PlaywrightService {
         }
       });
 
+      const collectPageDiagnostics = async (stage = 'page_diagnostics'): Promise<Record<string, unknown>> => {
+        const startedAt = Date.now();
+        logCaptureStage(stage, 'started', targetUrl, startedAt);
+        try {
+          const diagnostics = await this.readPageDiagnostics(page);
+          logCaptureStage(stage, 'succeeded', targetUrl, startedAt);
+          return diagnostics;
+        } catch (error) {
+          logCaptureStage(stage, 'failed', targetUrl, startedAt, error);
+          throw error;
+        }
+      };
+
       const navigationStartedAt = Date.now();
       let navigationDurationMs: number | null = null;
       let navigationTimedOut = false;
       let navigationError: string | null = null;
       let captureOutcome: 'CAPTURED' | 'NAVIGATION_TIMEOUT_USABLE_STATE' = 'CAPTURED';
+      logCaptureStage('navigation', 'started', targetUrl, navigationStartedAt);
       try {
         await page.goto(targetUrl, {
           waitUntil: 'domcontentloaded',
           timeout: 30000,
         });
         navigationDurationMs = Date.now() - navigationStartedAt;
+        logCaptureStage('navigation', 'succeeded', targetUrl, navigationStartedAt);
       } catch (error: any) {
         navigationDurationMs = Date.now() - navigationStartedAt;
+        logCaptureStage('navigation', 'failed', targetUrl, navigationStartedAt, error);
         navigationTimedOut = /timeout/i.test(error?.message || '');
         navigationError = sanitizeDiagnosticMessage(error?.message || error);
         console.error('[Playwright] Navigation error:', sanitizeDiagnosticMessage(error?.message || error));
@@ -236,6 +320,8 @@ export class PlaywrightService {
 
         if (errMessage.includes('Timeout') || errMessage.includes('timeout')) {
           let hasUsableState = false;
+          const timeoutStateCheckStartedAt = Date.now();
+          logCaptureStage('navigation_timeout_state_check', 'started', targetUrl, timeoutStateCheckStartedAt);
           try {
             const currentUrl = page.url();
             if (currentUrl && currentUrl !== 'about:blank') {
@@ -247,13 +333,15 @@ export class PlaywrightService {
                 captureOutcome = 'NAVIGATION_TIMEOUT_USABLE_STATE';
               }
             }
-          } catch {
+            logCaptureStage('navigation_timeout_state_check', 'succeeded', targetUrl, timeoutStateCheckStartedAt);
+          } catch (stateCheckError) {
+            logCaptureStage('navigation_timeout_state_check', 'failed', targetUrl, timeoutStateCheckStartedAt, stateCheckError);
             hasUsableState = false;
           }
 
           if (!hasUsableState) {
-            const pageState = await this.readPageDiagnostics(page).catch(() => null);
-            if (onDiagnostics) await onDiagnostics(sanitizePlaywrightDiagnostics({
+            const pageState = await collectPageDiagnostics('navigation_failure_page_diagnostics').catch(() => null);
+            await emitDiagnostics('diagnostics_persist_navigation_failure', sanitizePlaywrightDiagnostics({
               requestedUrl: targetUrl,
               page: pageState,
               outcome: 'NAVIGATION_FAILED',
@@ -271,20 +359,20 @@ export class PlaywrightService {
           errMessage.includes('ECONNREFUSED') ||
           errMessage.includes('ECONNRESET')
         ) {
-          const pageState = await this.readPageDiagnostics(page).catch(() => null);
-          if (onDiagnostics) await onDiagnostics(sanitizePlaywrightDiagnostics({ requestedUrl: targetUrl, page: pageState, outcome: 'NAVIGATION_FAILED', navigationDurationMs, navigationTimedOut, navigationError, browserEvents: diagnosticEvents }));
+          const pageState = await collectPageDiagnostics('navigation_failure_page_diagnostics').catch(() => null);
+          await emitDiagnostics('diagnostics_persist_navigation_failure', sanitizePlaywrightDiagnostics({ requestedUrl: targetUrl, page: pageState, outcome: 'NAVIGATION_FAILED', navigationDurationMs, navigationTimedOut, navigationError, browserEvents: diagnosticEvents }));
           throw new TargetPageValidationError({ status: 'INCONCLUSIVE', reasonCode: 'BROWSER_NETWORK_ERROR', reason: 'The browser could not connect to the target page.' });
         } else if (errMessage.includes('net::ERR_NAME_NOT_RESOLVED') || errMessage.includes('ENOTFOUND')) {
-          const pageState = await this.readPageDiagnostics(page).catch(() => null);
-          if (onDiagnostics) await onDiagnostics(sanitizePlaywrightDiagnostics({ requestedUrl: targetUrl, page: pageState, outcome: 'NAVIGATION_FAILED', navigationDurationMs, navigationTimedOut, navigationError, browserEvents: diagnosticEvents }));
+          const pageState = await collectPageDiagnostics('navigation_failure_page_diagnostics').catch(() => null);
+          await emitDiagnostics('diagnostics_persist_navigation_failure', sanitizePlaywrightDiagnostics({ requestedUrl: targetUrl, page: pageState, outcome: 'NAVIGATION_FAILED', navigationDurationMs, navigationTimedOut, navigationError, browserEvents: diagnosticEvents }));
           throw new TargetPageValidationError({ status: 'INCONCLUSIVE', reasonCode: 'BROWSER_NETWORK_ERROR', reason: 'The target hostname could not be resolved.' });
         } else if (errMessage.includes('net::ERR_SSL') || errMessage.includes('CERT')) {
-          const pageState = await this.readPageDiagnostics(page).catch(() => null);
-          if (onDiagnostics) await onDiagnostics(sanitizePlaywrightDiagnostics({ requestedUrl: targetUrl, page: pageState, outcome: 'NAVIGATION_FAILED', navigationDurationMs, navigationTimedOut, navigationError, browserEvents: diagnosticEvents }));
+          const pageState = await collectPageDiagnostics('navigation_failure_page_diagnostics').catch(() => null);
+          await emitDiagnostics('diagnostics_persist_navigation_failure', sanitizePlaywrightDiagnostics({ requestedUrl: targetUrl, page: pageState, outcome: 'NAVIGATION_FAILED', navigationDurationMs, navigationTimedOut, navigationError, browserEvents: diagnosticEvents }));
           throw new TargetPageValidationError({ status: 'INCONCLUSIVE', reasonCode: 'BROWSER_NETWORK_ERROR', reason: 'The browser could not establish a secure connection to the target.' });
         } else {
-          const pageState = await this.readPageDiagnostics(page).catch(() => null);
-          if (onDiagnostics) await onDiagnostics(sanitizePlaywrightDiagnostics({ requestedUrl: targetUrl, page: pageState, outcome: 'NAVIGATION_FAILED', navigationDurationMs, navigationTimedOut, navigationError, browserEvents: diagnosticEvents }));
+          const pageState = await collectPageDiagnostics('navigation_failure_page_diagnostics').catch(() => null);
+          await emitDiagnostics('diagnostics_persist_navigation_failure', sanitizePlaywrightDiagnostics({ requestedUrl: targetUrl, page: pageState, outcome: 'NAVIGATION_FAILED', navigationDurationMs, navigationTimedOut, navigationError, browserEvents: diagnosticEvents }));
           throw new TargetPageValidationError({ status: 'INCONCLUSIVE', reasonCode: 'BROWSER_NETWORK_ERROR', reason: 'Navigation failed before the intended page could be evaluated.' });
         }
       }
@@ -292,9 +380,12 @@ export class PlaywrightService {
       // Settling period to allow visual components and fonts to stabilize
       const settlingDelayMs = this.settlingDelayMs;
       const settlingStartedAt = Date.now();
+      logCaptureStage('settling_delay', 'started', targetUrl, settlingStartedAt);
       try {
         await page.waitForTimeout(settlingDelayMs);
-      } catch {
+        logCaptureStage('settling_delay', 'succeeded', targetUrl, settlingStartedAt);
+      } catch (error) {
+        logCaptureStage('settling_delay', 'failed', targetUrl, settlingStartedAt, error);
         // Ignore errors during settling phase
       }
 
@@ -305,7 +396,7 @@ export class PlaywrightService {
       const screenshotStartedAt = new Date().toISOString();
       let pageDiagnostics: Record<string, unknown> | null = null;
       try {
-        pageDiagnostics = await this.readPageDiagnostics(page);
+        pageDiagnostics = await collectPageDiagnostics();
       } catch (error: any) {
         pageDiagnostics = { collectionError: sanitizeDiagnosticMessage(error?.message || error) };
       }
@@ -334,7 +425,7 @@ export class PlaywrightService {
           navigationError,
           browserEvents: diagnosticEvents,
         });
-        if (onDiagnostics) await onDiagnostics(validationDiagnostics);
+        await emitDiagnostics('diagnostics_persist_validation', validationDiagnostics);
         console.warn('[Playwright] Target validation rejected evaluation:', {
           status: targetValidation.status,
           reasonCode: targetValidation.reasonCode,
@@ -354,7 +445,7 @@ export class PlaywrightService {
         screenshotStartedAt,
         browserEvents: diagnosticEvents,
       };
-      if (onDiagnostics) await onDiagnostics(sanitizePlaywrightDiagnostics(baseDiagnostics));
+      await emitDiagnostics('diagnostics_persist_capture', sanitizePlaywrightDiagnostics(baseDiagnostics));
       const safePageDiagnostics = pageDiagnostics ? {
         ...pageDiagnostics,
         ...(typeof pageDiagnostics.finalUrl === 'string' ? { finalUrl: sanitizeDiagnosticUrl(pageDiagnostics.finalUrl) } : {}),
@@ -402,7 +493,7 @@ export class PlaywrightService {
         const screenshotDurationMs = Date.now() - screenshotCaptureStartedAt;
         const screenshotCompletedAt = new Date().toISOString();
         screenshotStage = 'persist_diagnostics';
-        if (onDiagnostics) await onDiagnostics(sanitizePlaywrightDiagnostics({
+        await emitDiagnostics('diagnostics_persist_capture_success', sanitizePlaywrightDiagnostics({
           ...baseDiagnostics,
           screenshotDurationMs,
           screenshotCompletedAt,
@@ -420,7 +511,14 @@ export class PlaywrightService {
         this.scheduleDevelopmentCleanup(filename);
         return { url: targetUrl, filename, path: relativePath, sha256 };
       } catch (error) {
-        await fs.promises.unlink(absolutePath).catch(() => {});
+        const artifactCleanupStartedAt = Date.now();
+        logCaptureStage('screenshot_artifact_cleanup', 'started', targetUrl, artifactCleanupStartedAt);
+        try {
+          await fs.promises.unlink(absolutePath);
+          logCaptureStage('screenshot_artifact_cleanup', 'succeeded', targetUrl, artifactCleanupStartedAt);
+        } catch (cleanupError) {
+          logCaptureStage('screenshot_artifact_cleanup', 'failed', targetUrl, artifactCleanupStartedAt, cleanupError);
+        }
         const captureError = error as any;
         const screenshotError = sanitizeDiagnosticMessage(captureError?.message || error);
         const errorName = sanitizeDiagnosticMessage(captureError?.name || 'Error');
@@ -459,7 +557,7 @@ export class PlaywrightService {
           finalUrl: sanitizeDiagnosticUrl(page.url()),
           pageGeometry,
         });
-        if (onDiagnostics) await onDiagnostics(sanitizePlaywrightDiagnostics({
+        await emitDiagnostics('diagnostics_persist_capture_failure', sanitizePlaywrightDiagnostics({
           ...baseDiagnostics,
           outcome: 'CAPTURE_FAILED',
           screenshotDurationMs: Date.now() - screenshotCaptureStartedAt,
@@ -469,7 +567,14 @@ export class PlaywrightService {
       }
     } finally {
       if (browser) {
-        await browser.close().catch(() => {});
+        const closeStartedAt = Date.now();
+        logCaptureStage('browser_cleanup', 'started', targetUrl, closeStartedAt);
+        try {
+          await browser.close();
+          logCaptureStage('browser_cleanup', 'succeeded', targetUrl, closeStartedAt);
+        } catch (error) {
+          logCaptureStage('browser_cleanup', 'failed', targetUrl, closeStartedAt, error);
+        }
       }
     }
   }
