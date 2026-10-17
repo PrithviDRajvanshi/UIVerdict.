@@ -100,6 +100,10 @@ export class PlaywrightService {
         visibleElementCount: [...(document.body?.querySelectorAll('*') ?? [])].filter(visible).length,
         imageCount: document.images.length,
         buttonCount: document.querySelectorAll('button,[role="button"]').length,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        documentWidth: document.documentElement?.scrollWidth ?? 0,
+        documentHeight: document.documentElement?.scrollHeight ?? 0,
         bodyText: document.body?.innerText.slice(0, 12000) ?? '',
         hasBody: Boolean(document.body),
         hasCanvasOrSvg: Boolean(document.querySelector('canvas,svg')),
@@ -367,16 +371,37 @@ export class PlaywrightService {
         browserEvents: diagnosticEvents,
       });
 
+      const screenshotCallStartedAt = Date.now();
+      let screenshotStage: 'browser_capture' | 'read_artifact' | 'hash_artifact' | 'persist_diagnostics' = 'browser_capture';
+      console.info('[Playwright] Full-page screenshot capture started:', {
+        requestedUrl: sanitizeDiagnosticUrl(targetUrl),
+        fullPage: true,
+        timeoutMs: this.screenshotTimeoutMs,
+        pageClosed: page.isClosed(),
+        browserConnected: browser.isConnected(),
+        viewportWidth: pageDiagnostics?.viewportWidth ?? null,
+        viewportHeight: pageDiagnostics?.viewportHeight ?? null,
+        documentWidth: pageDiagnostics?.documentWidth ?? null,
+        documentHeight: pageDiagnostics?.documentHeight ?? null,
+        startedAt: new Date(screenshotCallStartedAt).toISOString(),
+      });
       try {
         await page.screenshot({
           path: absolutePath,
           fullPage: true,
           timeout: this.screenshotTimeoutMs,
         });
+        console.info('[Playwright] Full-page screenshot browser capture completed:', {
+          requestedUrl: sanitizeDiagnosticUrl(targetUrl),
+          elapsedMs: Date.now() - screenshotCallStartedAt,
+        });
+        screenshotStage = 'read_artifact';
         const screenshotBytes = await fs.promises.readFile(absolutePath);
+        screenshotStage = 'hash_artifact';
         const sha256 = crypto.createHash('sha256').update(screenshotBytes).digest('hex');
         const screenshotDurationMs = Date.now() - screenshotCaptureStartedAt;
         const screenshotCompletedAt = new Date().toISOString();
+        screenshotStage = 'persist_diagnostics';
         if (onDiagnostics) await onDiagnostics(sanitizePlaywrightDiagnostics({
           ...baseDiagnostics,
           screenshotDurationMs,
@@ -386,12 +411,28 @@ export class PlaywrightService {
           screenshotDurationMs,
           screenshotCompletedAt,
         });
+        console.info('[Playwright] Full-page screenshot capture completed:', {
+          requestedUrl: sanitizeDiagnosticUrl(targetUrl),
+          elapsedMs: Date.now() - screenshotCallStartedAt,
+          artifactBytes: screenshotBytes.length,
+          completedAt: screenshotCompletedAt,
+        });
         this.scheduleDevelopmentCleanup(filename);
         return { url: targetUrl, filename, path: relativePath, sha256 };
       } catch (error) {
         await fs.promises.unlink(absolutePath).catch(() => {});
         const captureError = error as any;
         const screenshotError = sanitizeDiagnosticMessage(captureError?.message || error);
+        const errorName = sanitizeDiagnosticMessage(captureError?.name || 'Error');
+        const errorCode = sanitizeDiagnosticMessage(captureError?.code || 'unknown');
+        // Process-level OOM kills may happen without a catchable JavaScript exception.
+        const failureClass = /timeout|timed out/i.test(screenshotError)
+          ? 'TIMEOUT'
+          : page.isClosed() || !browser?.isConnected() || /target.*closed|browser.*closed|context.*closed|browser.*disconnected/i.test(screenshotError)
+          ? 'PAGE_OR_BROWSER_CLOSED'
+          : /out of memory|enomem|allocation failed|memory limit/i.test(screenshotError)
+          ? 'RESOURCE_EXHAUSTION'
+          : 'OTHER';
         let pageGeometry: Record<string, number> | null = null;
         try {
           pageGeometry = await page.evaluate(() => ({
@@ -405,10 +446,16 @@ export class PlaywrightService {
           // Page may already be detached or closed; the capture error is primary.
         }
         console.error('[Playwright] Full-page screenshot failed:', {
-          errorName: sanitizeDiagnosticMessage(captureError?.name || 'Error'),
-          errorCode: sanitizeDiagnosticMessage(captureError?.code || 'unknown'),
+          requestedUrl: sanitizeDiagnosticUrl(targetUrl),
+          stage: screenshotStage,
+          failureClass,
+          elapsedMs: Date.now() - screenshotCallStartedAt,
+          timeoutMs: this.screenshotTimeoutMs,
+          errorName,
+          errorCode,
           message: screenshotError,
           pageClosed: page.isClosed(),
+          browserConnected: browser?.isConnected() ?? false,
           finalUrl: sanitizeDiagnosticUrl(page.url()),
           pageGeometry,
         });
