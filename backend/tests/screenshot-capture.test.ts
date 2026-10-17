@@ -67,6 +67,22 @@ async function run() {
       await corsService.removeScreenshot(corsScreenshot);
     }
 
+    const navigationFailureService = new PlaywrightService(5000, 0);
+    await assert.rejects(() => navigationFailureService.captureScreenshot(
+      'http://127.0.0.1:1/navigation-failure?secret=private',
+      'screenshot-navigation-failure',
+    ));
+    const navigationFailureLog = logs
+      .filter((entry) => String(entry.args[0]).startsWith('[Playwright] Capture stage failed:'))
+      .map((entry) => entry.args[1] as Record<string, any>)
+      .find((event) => event.stage === 'navigation');
+    assert.ok(navigationFailureLog, 'navigation failures include a stage failure log');
+    assert.ok(navigationFailureLog.errorName.length > 0 && navigationFailureLog.errorCode.length > 0,
+      'navigation failure logs include the sanitized error name and code');
+    assert.ok(navigationFailureLog.message.length > 0, 'navigation failure logs include a sanitized message');
+    assert.ok(!JSON.stringify(navigationFailureLog).includes('private') && !navigationFailureLog.requestedUrl.includes('?'),
+      'navigation failure logs redact query parameters');
+
     const timeoutDiagnostics: PlaywrightDiagnosticMetadata[] = [];
     const timeoutService = new PlaywrightService(500, 0);
     const timeoutAnalysisId = `screenshot-timeout-${Date.now()}`;
@@ -92,6 +108,15 @@ async function run() {
     assert.ok(!Object.hasOwn(captureFailure, 'stack'), 'failure log omits the raw exception stack');
     assert.ok(!JSON.stringify(captureFailure).includes('private'), 'failure log does not expose the URL query secret');
     assert.ok(logs.some((entry) => entry.level === 'info' && String(entry.args[0]).includes('Full-page screenshot capture started')));
+    const stageEntries = logs.filter((entry) => String(entry.args[0]).startsWith('[Playwright] Capture stage '));
+    const stageEvents = stageEntries.map((entry) => entry.args[1] as Record<string, any>);
+    for (const stage of ['browser_launch', 'context_create', 'page_create', 'navigation', 'settling_delay', 'page_diagnostics', 'diagnostics_persist_capture', 'browser_cleanup']) {
+      assert.ok(stageEvents.some((event) => event.stage === stage && event.status === 'started'), `${stage} logs its start before the operation`);
+      assert.ok(stageEvents.some((event) => event.stage === stage && event.status === 'succeeded'), `${stage} logs successful completion`);
+    }
+    assert.ok(stageEvents.every((event) => event.elapsedMs >= 0), 'stage logs include elapsed time');
+    assert.ok(stageEvents.every((event) => !event.requestedUrl.includes('?') && !JSON.stringify(event).includes('private')),
+      'stage logs sanitize query parameters and their values');
     assert.ok((diagnostic?.screenshotDurationMs ?? 0) > 0, 'failed capture duration is retained in diagnostics');
     assert.ok(!JSON.stringify(diagnostic).includes('private'), 'diagnostics continue to redact query strings');
     const screenshotDir = require('path').resolve(process.cwd(), 'temp', 'screenshots');
