@@ -31,6 +31,66 @@ export interface LighthouseMetrics {
 
 export type LighthouseDiagnosticsCallback = (diagnostics: LighthouseDiagnosticMetadata) => Promise<void>;
 
+async function logCgroupMemorySnapshot(stage: 'before_launch' | 'after_audit' | 'after_cleanup', attempt: number): Promise<void> {
+  try {
+    const [currentText, statText, eventsText] = await Promise.all([
+      fs.readFile('/sys/fs/cgroup/memory.current', 'utf8'),
+      fs.readFile('/sys/fs/cgroup/memory.stat', 'utf8'),
+      fs.readFile('/sys/fs/cgroup/memory.events', 'utf8'),
+    ]);
+    const readValue = (text: string, key: string): number | null => {
+      const line = text.split(/\r?\n/).find((entry) => entry.startsWith(`${key} `));
+      if (!line) return null;
+      const value = Number(line.trim().split(/\s+/)[1]);
+      return Number.isFinite(value) ? value : null;
+    };
+    const memoryCurrent = Number(currentText.trim());
+    const anon = readValue(statText, 'anon');
+    const oomKill = readValue(eventsText, 'oom_kill');
+    if (!Number.isFinite(memoryCurrent) || anon === null || oomKill === null) return;
+    console.info('[Lighthouse] Cgroup memory snapshot:', {
+      attempt,
+      stage,
+      memoryCurrentBytes: memoryCurrent,
+      anonBytes: anon,
+      oomKill,
+    });
+  } catch {
+    // cgroup v2 files may not be mounted or readable; resource diagnostics are best effort.
+  }
+}
+
+function logAttemptError(error: any, attempt: number, maxAttempts: number, lhrRuntimeError: unknown): void {
+  const stackLines = typeof error?.stack === 'string'
+    ? error.stack.split(/\r?\n/).slice(0, 5).map((line: string) => sanitizeDiagnosticMessage(line))
+    : [];
+  const normalizedRuntimeError = lhrRuntimeError === null || lhrRuntimeError === undefined
+    ? null
+    : typeof lhrRuntimeError === 'object'
+    ? {
+      name: sanitizeDiagnosticMessage((lhrRuntimeError as any).name || 'Error'),
+      code: sanitizeDiagnosticMessage((lhrRuntimeError as any).code || ''),
+      message: sanitizeDiagnosticMessage((lhrRuntimeError as any).message || lhrRuntimeError),
+      stackLines: typeof (lhrRuntimeError as any).stack === 'string'
+        ? (lhrRuntimeError as any).stack.split(/\r?\n/).slice(0, 5).map((line: string) => sanitizeDiagnosticMessage(line))
+        : [],
+    }
+    : sanitizeDiagnosticMessage(lhrRuntimeError);
+  try {
+    console.error('[Lighthouse] Attempt failed with underlying error:', {
+      attempt,
+      maxAttempts,
+      name: sanitizeDiagnosticMessage(error?.name || 'Error'),
+      code: sanitizeDiagnosticMessage(error?.code || ''),
+      message: sanitizeDiagnosticMessage(error?.message || error),
+      stackLines,
+      lhrRuntimeError: normalizedRuntimeError,
+    });
+  } catch {
+    // Diagnostic logging must not change the attempt's error or cleanup behavior.
+  }
+}
+
 async function waitForChromeExit(chrome: chromeLauncher.LaunchedChrome, timeoutMs: number): Promise<void> {
   const child = chrome.process;
   if (child.exitCode !== null || child.signalCode !== null) return;
@@ -236,6 +296,7 @@ export class LighthouseService {
   private async runSingleAudit(targetUrl: string, attempt: number, maxAttempts: number, onDiagnostics?: LighthouseDiagnosticsCallback): Promise<LighthouseMetrics> {
     let chrome: chromeLauncher.LaunchedChrome | null = null;
     let auditError: unknown = null;
+    let lhrRuntimeError: unknown = null;
     const navigationResponses: Array<{ url: string; status: number }> = [];
     let finalUrl: string | null = null;
     let auditStartedAt = Date.now();
@@ -266,6 +327,7 @@ export class LighthouseService {
     const chromePath = process.env.CHROME_PATH || chromium.executablePath();
 
     try {
+      await logCgroupMemorySnapshot('before_launch', attempt);
       chrome = await this.dependencies.launchChrome({
         chromePath,
         chromeFlags: [
@@ -297,7 +359,13 @@ export class LighthouseService {
 
       console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Running audit...`);
       auditStartedAt = Date.now();
-      const runnerResult = await this.dependencies.runLighthouse(targetUrl, flags, config);
+      let runnerResult: any;
+      try {
+        runnerResult = await this.dependencies.runLighthouse(targetUrl, flags, config);
+        lhrRuntimeError = runnerResult?.lhr?.runtimeError ?? null;
+      } finally {
+        await logCgroupMemorySnapshot('after_audit', attempt);
+      }
       auditDurationMs = Date.now() - auditStartedAt;
 
       if (!runnerResult || !runnerResult.lhr) {
@@ -365,6 +433,7 @@ export class LighthouseService {
       return metrics;
     } catch (error: any) {
       auditError = error;
+      logAttemptError(error, attempt, maxAttempts, lhrRuntimeError);
       auditDurationMs = auditDurationMs ?? Date.now() - auditStartedAt;
       const lastNavigationStatus = navigationResponses.length ? navigationResponses[navigationResponses.length - 1].status : null;
       outcome = classifyLighthouseFailure(error, lastNavigationStatus);
@@ -383,37 +452,41 @@ export class LighthouseService {
       }
       throw error;
     } finally {
-      if (chrome) {
-        console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Cleaning up Chrome process...`);
-        try {
-          await this.dependencies.stopChrome(chrome);
-          console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Chrome process exited and cleanup completed`);
-        } catch (killErr) {
-          const cleanupError = new ApiError(500, 'Lighthouse Chrome process cleanup failed');
-          const propagatedError = auditError && (typeof auditError === 'object' || typeof auditError === 'function')
-            ? auditError as object
-            : cleanupError;
-          markBrowserCleanupFailure(propagatedError);
+      try {
+        if (chrome) {
+          console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Cleaning up Chrome process...`);
           try {
-            console.error('[Lighthouse] Warning closing Chrome:', sanitizeDiagnosticMessage((killErr as any)?.message || killErr));
-          } catch {
-            // The propagated error has already been marked for fail-closed handling.
-          }
-          if (propagatedError === cleanupError) {
-            outcome = 'AUDIT_FAILED';
-            failureReason = 'Lighthouse Chrome process cleanup failed';
+            await this.dependencies.stopChrome(chrome);
+            console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Chrome process exited and cleanup completed`);
+          } catch (killErr) {
+            const cleanupError = new ApiError(500, 'Lighthouse Chrome process cleanup failed');
+            const propagatedError = auditError && (typeof auditError === 'object' || typeof auditError === 'function')
+              ? auditError as object
+              : cleanupError;
+            markBrowserCleanupFailure(propagatedError);
             try {
-              await persistDiagnostics(outcome);
-            } catch (diagnosticsError: any) {
-              try {
-                console.error('[Lighthouse] Failed to persist browser cleanup failure:', sanitizeDiagnosticMessage(diagnosticsError?.message || diagnosticsError));
-              } catch {
-                // Keep the marked cleanup error as the propagated failure.
-              }
+              console.error('[Lighthouse] Warning closing Chrome:', sanitizeDiagnosticMessage((killErr as any)?.message || killErr));
+            } catch {
+              // The propagated error has already been marked for fail-closed handling.
             }
-            throw cleanupError;
+            if (propagatedError === cleanupError) {
+              outcome = 'AUDIT_FAILED';
+              failureReason = 'Lighthouse Chrome process cleanup failed';
+              try {
+                await persistDiagnostics(outcome);
+              } catch (diagnosticsError: any) {
+                try {
+                  console.error('[Lighthouse] Failed to persist browser cleanup failure:', sanitizeDiagnosticMessage(diagnosticsError?.message || diagnosticsError));
+                } catch {
+                  // Keep the marked cleanup error as the propagated failure.
+                }
+              }
+              throw cleanupError;
+            }
           }
         }
+      } finally {
+        await logCgroupMemorySnapshot('after_cleanup', attempt);
       }
     }
   }
