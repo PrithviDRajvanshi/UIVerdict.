@@ -25,7 +25,7 @@ export const DEFAULT_FULL_PAGE_SCREENSHOT_TIMEOUT_MS = 60_000;
 
 function logCaptureStage(
   stage: string,
-  status: 'started' | 'succeeded' | 'failed',
+  status: 'started' | 'succeeded' | 'failed' | 'already_absent',
   targetUrl: string,
   startedAt: number,
   error?: unknown,
@@ -47,6 +47,58 @@ function logCaptureStage(
   else console.info(label, details);
 }
 
+function readCgroupText(filePath: string): string | null {
+  try {
+    return fs.readFileSync(filePath, 'utf8').trim();
+  } catch {
+    return null;
+  }
+}
+
+function parseCgroupCounters(raw: string | null, allowedNames: string[]): Record<string, number> | null {
+  if (!raw) return null;
+  const counters: Record<string, number> = {};
+  for (const line of raw.split(/\r?\n/)) {
+    const [name, value] = line.trim().split(/\s+/);
+    const count = Number(value);
+    if (allowedNames.includes(name) && Number.isFinite(count) && count >= 0) counters[name] = count;
+  }
+  return Object.keys(counters).length ? counters : null;
+}
+
+function readContainerMemorySnapshot(): Record<string, unknown> | null {
+  const v2Current = readCgroupText('/sys/fs/cgroup/memory.current');
+  const v2Limit = readCgroupText('/sys/fs/cgroup/memory.max');
+  const v2Events = parseCgroupCounters(readCgroupText('/sys/fs/cgroup/memory.events'), ['high', 'max', 'oom', 'oom_kill', 'oom_group_kill']);
+  if (v2Current !== null || v2Limit !== null || v2Events) {
+    const current = v2Current === null ? Number.NaN : Number(v2Current);
+    const limit = v2Limit === null || v2Limit === 'max' ? Number.NaN : Number(v2Limit);
+    return {
+      cgroupVersion: 2,
+      currentBytes: Number.isFinite(current) ? current : null,
+      limitBytes: Number.isFinite(limit) ? limit : null,
+      limitUnlimited: v2Limit === 'max',
+      events: v2Events,
+    };
+  }
+
+  const v1Usage = readCgroupText('/sys/fs/cgroup/memory/memory.usage_in_bytes');
+  const v1Limit = readCgroupText('/sys/fs/cgroup/memory/memory.limit_in_bytes');
+  const v1FailCount = readCgroupText('/sys/fs/cgroup/memory/memory.failcnt');
+  const v1OomControl = readCgroupText('/sys/fs/cgroup/memory/memory.oom_control');
+  if (v1Usage === null && v1Limit === null && v1FailCount === null && v1OomControl === null) return null;
+  const usage = v1Usage === null ? Number.NaN : Number(v1Usage);
+  const limit = v1Limit === null ? Number.NaN : Number(v1Limit);
+  const failCount = v1FailCount === null ? Number.NaN : Number(v1FailCount);
+  return {
+    cgroupVersion: 1,
+    currentBytes: Number.isFinite(usage) ? usage : null,
+    limitBytes: Number.isFinite(limit) ? limit : null,
+    failCount: Number.isFinite(failCount) ? failCount : null,
+    oomControl: parseCgroupCounters(v1OomControl, ['under_oom', 'oom_kill']),
+  };
+}
+
 export class PlaywrightService {
   private tempDir: string;
 
@@ -61,6 +113,61 @@ export class PlaywrightService {
     if (!fs.existsSync(this.tempDir)) {
       fs.mkdirSync(this.tempDir, { recursive: true });
     }
+  }
+
+  private readScreenshotResourceDiagnostics(): Record<string, unknown> {
+    const memory = process.memoryUsage();
+    return {
+      nodeVersion: process.version,
+      platform: process.platform,
+      architecture: process.arch,
+      uptimeSeconds: Math.round(process.uptime()),
+      processMemoryBytes: {
+        rss: memory.rss,
+        heapTotal: memory.heapTotal,
+        heapUsed: memory.heapUsed,
+        external: memory.external,
+        arrayBuffers: memory.arrayBuffers,
+      },
+      containerMemory: readContainerMemorySnapshot(),
+    };
+  }
+
+  private collectScreenshotFailureDiagnostics(
+    page: Page,
+    browser: Browser | null,
+    pageDiagnostics: Record<string, unknown> | null,
+  ): Record<string, unknown> {
+    let pageClosed: boolean | null = null;
+    let browserConnected: boolean | null = null;
+    let finalUrl: string | null = null;
+    let pageGeometry: Record<string, number> | null = null;
+    let resourceDiagnostics: Record<string, unknown> | null = null;
+    let resourceDiagnosticsError: string | null = null;
+
+    try { pageClosed = page.isClosed(); } catch { /* Diagnostic state is optional. */ }
+    try { browserConnected = browser?.isConnected() ?? false; } catch { /* Diagnostic state is optional. */ }
+    try { finalUrl = sanitizeDiagnosticUrl(page.url()); } catch { /* The page may already be detached. */ }
+    const geometryFields = ['viewportWidth', 'viewportHeight', 'documentWidth', 'documentHeight', 'devicePixelRatio'];
+    const capturedGeometry = Object.fromEntries(geometryFields
+      .filter((key) => typeof pageDiagnostics?.[key] === 'number' && Number.isFinite(pageDiagnostics[key]))
+      .map((key) => [key, pageDiagnostics?.[key] as number]));
+    if (Object.keys(capturedGeometry).length) pageGeometry = capturedGeometry;
+    try {
+      resourceDiagnostics = this.readScreenshotResourceDiagnostics();
+    } catch (error: any) {
+      resourceDiagnosticsError = sanitizeDiagnosticMessage(error?.message || error);
+    }
+
+    return {
+      pageClosed,
+      browserConnected,
+      finalUrl,
+      pageGeometry,
+      pageGeometrySource: 'pre_capture_page_diagnostics',
+      resourceDiagnostics,
+      resourceDiagnosticsError,
+    };
   }
 
   private generateFilename(targetUrl: string, analysisId?: string): string {
@@ -128,6 +235,7 @@ export class PlaywrightService {
         viewportHeight: window.innerHeight,
         documentWidth: document.documentElement?.scrollWidth ?? 0,
         documentHeight: document.documentElement?.scrollHeight ?? 0,
+        devicePixelRatio: window.devicePixelRatio,
         bodyText: document.body?.innerText.slice(0, 12000) ?? '',
         hasBody: Boolean(document.body),
         hasCanvasOrSvg: Boolean(document.querySelector('canvas,svg')),
@@ -464,16 +572,31 @@ export class PlaywrightService {
 
       const screenshotCallStartedAt = Date.now();
       let screenshotStage: 'browser_capture' | 'read_artifact' | 'hash_artifact' | 'persist_diagnostics' = 'browser_capture';
-      console.info('[Playwright] Full-page screenshot capture started:', {
-        requestedUrl: sanitizeDiagnosticUrl(targetUrl),
+      const screenshotOptions = {
         fullPage: true,
         timeoutMs: this.screenshotTimeoutMs,
+        outputFormat: 'png',
+        outputPathConfigured: true,
+      };
+      let screenshotStartResources: Record<string, unknown> | null = null;
+      let screenshotStartResourceError: string | null = null;
+      try {
+        screenshotStartResources = this.readScreenshotResourceDiagnostics();
+      } catch (resourceError: any) {
+        screenshotStartResourceError = sanitizeDiagnosticMessage(resourceError?.message || resourceError);
+      }
+      console.info('[Playwright] Full-page screenshot capture started:', {
+        requestedUrl: sanitizeDiagnosticUrl(targetUrl),
+        screenshotOptions,
         pageClosed: page.isClosed(),
         browserConnected: browser.isConnected(),
         viewportWidth: pageDiagnostics?.viewportWidth ?? null,
         viewportHeight: pageDiagnostics?.viewportHeight ?? null,
         documentWidth: pageDiagnostics?.documentWidth ?? null,
         documentHeight: pageDiagnostics?.documentHeight ?? null,
+        devicePixelRatio: pageDiagnostics?.devicePixelRatio ?? null,
+        resourceDiagnostics: screenshotStartResources,
+        resourceDiagnosticsError: screenshotStartResourceError,
         startedAt: new Date(screenshotCallStartedAt).toISOString(),
       });
       try {
@@ -517,32 +640,33 @@ export class PlaywrightService {
           await fs.promises.unlink(absolutePath);
           logCaptureStage('screenshot_artifact_cleanup', 'succeeded', targetUrl, artifactCleanupStartedAt);
         } catch (cleanupError) {
-          logCaptureStage('screenshot_artifact_cleanup', 'failed', targetUrl, artifactCleanupStartedAt, cleanupError);
+          if ((cleanupError as NodeJS.ErrnoException)?.code === 'ENOENT') {
+            logCaptureStage('screenshot_artifact_cleanup', 'already_absent', targetUrl, artifactCleanupStartedAt);
+          } else {
+            logCaptureStage('screenshot_artifact_cleanup', 'failed', targetUrl, artifactCleanupStartedAt, cleanupError);
+          }
         }
         const captureError = error as any;
         const screenshotError = sanitizeDiagnosticMessage(captureError?.message || error);
         const errorName = sanitizeDiagnosticMessage(captureError?.name || 'Error');
         const errorCode = sanitizeDiagnosticMessage(captureError?.code || 'unknown');
         // Process-level OOM kills may happen without a catchable JavaScript exception.
+        let failureDiagnostics: Record<string, unknown> = {};
+        let failureDiagnosticsError: string | null = null;
+        try {
+          failureDiagnostics = this.collectScreenshotFailureDiagnostics(page, browser, pageDiagnostics);
+        } catch (diagnosticError: any) {
+          failureDiagnosticsError = sanitizeDiagnosticMessage(diagnosticError?.message || diagnosticError);
+        }
+        const pageClosed = failureDiagnostics.pageClosed === true;
+        const browserConnected = failureDiagnostics.browserConnected !== false;
         const failureClass = /timeout|timed out/i.test(screenshotError)
           ? 'TIMEOUT'
-          : page.isClosed() || !browser?.isConnected() || /target.*closed|browser.*closed|context.*closed|browser.*disconnected/i.test(screenshotError)
+          : pageClosed || !browserConnected || /target.*closed|browser.*closed|context.*closed|browser.*disconnected/i.test(screenshotError)
           ? 'PAGE_OR_BROWSER_CLOSED'
           : /out of memory|enomem|allocation failed|memory limit/i.test(screenshotError)
           ? 'RESOURCE_EXHAUSTION'
           : 'OTHER';
-        let pageGeometry: Record<string, number> | null = null;
-        try {
-          pageGeometry = await page.evaluate(() => ({
-            viewportWidth: window.innerWidth,
-            viewportHeight: window.innerHeight,
-            documentWidth: document.documentElement?.scrollWidth ?? 0,
-            documentHeight: document.documentElement?.scrollHeight ?? 0,
-            devicePixelRatio: window.devicePixelRatio,
-          }));
-        } catch {
-          // Page may already be detached or closed; the capture error is primary.
-        }
         console.error('[Playwright] Full-page screenshot failed:', {
           requestedUrl: sanitizeDiagnosticUrl(targetUrl),
           stage: screenshotStage,
@@ -552,18 +676,23 @@ export class PlaywrightService {
           errorName,
           errorCode,
           message: screenshotError,
-          pageClosed: page.isClosed(),
-          browserConnected: browser?.isConnected() ?? false,
-          finalUrl: sanitizeDiagnosticUrl(page.url()),
-          pageGeometry,
+          screenshotOptions,
+          ...failureDiagnostics,
+          failureDiagnosticsError,
+          screenshotStartResources,
+          screenshotStartResourceError,
         });
-        await emitDiagnostics('diagnostics_persist_capture_failure', sanitizePlaywrightDiagnostics({
-          ...baseDiagnostics,
-          outcome: 'CAPTURE_FAILED',
-          screenshotDurationMs: Date.now() - screenshotCaptureStartedAt,
-          screenshotError,
-        }));
-        throw new ApiError(500, 'Failed to capture full page screenshot');
+        try {
+          await emitDiagnostics('diagnostics_persist_capture_failure', sanitizePlaywrightDiagnostics({
+            ...baseDiagnostics,
+            outcome: 'CAPTURE_FAILED',
+            screenshotDurationMs: Date.now() - screenshotCaptureStartedAt,
+            screenshotError,
+          }));
+        } catch {
+          // Failure-diagnostic persistence is best effort; preserve the screenshot exception.
+        }
+        throw error;
       }
     } finally {
       if (browser) {
