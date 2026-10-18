@@ -1,5 +1,6 @@
 import * as chromeLauncher from 'chrome-launcher';
 import { execFileSync } from 'child_process';
+import fs from 'fs/promises';
 import { chromium } from 'playwright';
 import { ApiError } from '../errors/ApiError';
 import { isBrowserCleanupFailure, markBrowserCleanupFailure } from './analysis-concurrency';
@@ -68,20 +69,102 @@ async function stopChromeProcessTreeAndWait(chrome: chromeLauncher.LaunchedChrom
     if ((error as NodeJS.ErrnoException)?.code !== 'ESRCH') throw error;
   }
 
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  await waitForLinuxProcessGroupExit(pid, timeoutMs);
+  await waitForChromeExit(chrome, timeoutMs);
+}
+
+interface LinuxProcessGroupMember {
+  pid: number;
+  state: string;
+  commandLine: string;
+}
+
+interface LinuxProcessGroupScan {
+  members: LinuxProcessGroupMember[];
+  complete: boolean;
+}
+
+async function scanLinuxProcessGroup(procRoot: string, pgid: number): Promise<LinuxProcessGroupScan> {
+  let entries: import('fs').Dirent[];
+  try {
+    entries = await fs.readdir(procRoot, { withFileTypes: true });
+  } catch {
+    return { members: [], complete: false };
+  }
+
+  const members: LinuxProcessGroupMember[] = [];
+  let complete = true;
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+    const pid = Number(entry.name);
+    let stat: string;
     try {
-      process.kill(-pid, 0);
+      stat = await fs.readFile(`${procRoot}/${entry.name}/stat`, 'utf8');
     } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === 'ESRCH') {
-        await waitForChromeExit(chrome, Math.max(1, deadline - Date.now()));
-        return;
-      }
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') complete = false;
+      continue;
+    }
+
+    const commandEnd = stat.lastIndexOf(')');
+    if (commandEnd < 0) {
+      complete = false;
+      continue;
+    }
+    const fields = stat.slice(commandEnd + 1).trim().split(/\s+/);
+    const state = fields[0];
+    const processGroup = Number(fields[2]); // stat field 5 (pgrp), after pid/comm/state/ppid.
+    if (!state || !Number.isInteger(processGroup)) {
+      complete = false;
+      continue;
+    }
+    if (processGroup !== pgid) continue;
+
+    let commandLine = '[unavailable]';
+    try {
+      const raw = await fs.readFile(`${procRoot}/${entry.name}/cmdline`);
+      commandLine = sanitizeDiagnosticMessage(raw.toString('utf8').replace(/\0/g, ' ').trim() || '[empty]');
+    } catch {
+      // A process may exit between reading stat and cmdline; retain the stat evidence.
+    }
+    members.push({ pid, state, commandLine });
+  }
+  return { members, complete };
+}
+
+type ProcessGroupProbe = (pgid: number) => boolean;
+
+export async function waitForLinuxProcessGroupExit(
+  pgid: number,
+  timeoutMs: number,
+  procRoot = '/proc',
+  groupExists: ProcessGroupProbe = (groupId) => {
+    try {
+      process.kill(-groupId, 0);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ESRCH') return false;
       throw error;
     }
+  },
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastScan: LinuxProcessGroupScan = { members: [], complete: false };
+  while (Date.now() < deadline) {
+    if (!groupExists(pgid)) return;
+    lastScan = await scanLinuxProcessGroup(procRoot, pgid);
+    const liveMembers = lastScan.members.filter((member) => member.state !== 'Z');
+    if (lastScan.complete && liveMembers.length === 0) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error('Timed out waiting for the Chrome process tree to exit');
+
+  const survivors = lastScan.members.filter((member) => member.state !== 'Z');
+  console.error('[Lighthouse] Chrome process group did not exit before timeout:', {
+    processGroup: pgid,
+    scanComplete: lastScan.complete,
+    survivors: survivors.map(({ pid, state, commandLine }) => ({ pid, state, commandLine })),
+  });
+  const survivorIds = survivors.map(({ pid }) => pid).join(', ') || 'unknown';
+  throw new Error(`Timed out waiting for live Chrome process group members to exit: ${survivorIds}`);
 }
 
 async function requestGracefulChromeShutdown(port: number): Promise<void> {
@@ -102,7 +185,10 @@ async function requestGracefulChromeShutdown(port: number): Promise<void> {
   socket.send(JSON.stringify({ id: 1, method: 'Browser.close' }));
 }
 
-async function stopChromeAndWait(chrome: chromeLauncher.LaunchedChrome): Promise<void> {
+export async function stopChromeAndWait(
+  chrome: chromeLauncher.LaunchedChrome,
+  waitForProcessTree: typeof stopChromeProcessTreeAndWait = stopChromeProcessTreeAndWait,
+): Promise<void> {
   if (chrome.process.exitCode === null && chrome.process.signalCode === null) {
     try {
       await requestGracefulChromeShutdown(chrome.port);
@@ -114,14 +200,39 @@ async function stopChromeAndWait(chrome: chromeLauncher.LaunchedChrome): Promise
 
   // Confirm the whole process tree is gone. chrome-launcher.kill() suppresses termination
   // errors, so it cannot be the sole evidence that it is safe to release the queue slot.
-  await stopChromeProcessTreeAndWait(chrome, 10000);
+  await waitForProcessTree(chrome, 10000);
 
   // chrome-launcher owns its temporary profile and signal-handler registry. Its synchronous
   // profile removal now runs only after the browser process tree has exited.
-  chrome.kill();
+  try {
+    chrome.kill();
+  } catch (error) {
+    console.warn('[Lighthouse] Chrome process tree exited, but chrome-launcher resource cleanup failed:',
+      sanitizeDiagnosticMessage((error as any)?.message || error));
+  }
+}
+
+interface LighthouseServiceDependencies {
+  launchChrome: typeof chromeLauncher.launch;
+  runLighthouse: (targetUrl: string, flags: Record<string, unknown>, config: Record<string, unknown>) => Promise<any>;
+  stopChrome: typeof stopChromeAndWait;
 }
 
 export class LighthouseService {
+  private readonly dependencies: LighthouseServiceDependencies;
+
+  constructor(dependencies: Partial<LighthouseServiceDependencies> = {}) {
+    this.dependencies = {
+      launchChrome: dependencies.launchChrome ?? chromeLauncher.launch,
+      runLighthouse: dependencies.runLighthouse ?? (async (targetUrl, flags, config) => {
+        const lighthouseModule = await import('lighthouse');
+        const lighthouse = lighthouseModule.default || lighthouseModule;
+        return (lighthouse as any)(targetUrl, flags, config);
+      }),
+      stopChrome: dependencies.stopChrome ?? stopChromeAndWait,
+    };
+  }
+
   private async runSingleAudit(targetUrl: string, attempt: number, maxAttempts: number, onDiagnostics?: LighthouseDiagnosticsCallback): Promise<LighthouseMetrics> {
     let chrome: chromeLauncher.LaunchedChrome | null = null;
     let auditError: unknown = null;
@@ -155,7 +266,7 @@ export class LighthouseService {
     const chromePath = process.env.CHROME_PATH || chromium.executablePath();
 
     try {
-      chrome = await chromeLauncher.launch({
+      chrome = await this.dependencies.launchChrome({
         chromePath,
         chromeFlags: [
           '--headless=new',
@@ -168,9 +279,6 @@ export class LighthouseService {
       });
 
       console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Dedicated Chrome listening on port ${chrome.port}`);
-
-      const lighthouseModule = await import('lighthouse');
-      const lighthouse = lighthouseModule.default || lighthouseModule;
 
       const flags = {
         logLevel: 'error' as const,
@@ -189,7 +297,7 @@ export class LighthouseService {
 
       console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Running audit...`);
       auditStartedAt = Date.now();
-      const runnerResult = await (lighthouse as any)(targetUrl, flags, config);
+      const runnerResult = await this.dependencies.runLighthouse(targetUrl, flags, config);
       auditDurationMs = Date.now() - auditStartedAt;
 
       if (!runnerResult || !runnerResult.lhr) {
@@ -261,28 +369,48 @@ export class LighthouseService {
       const lastNavigationStatus = navigationResponses.length ? navigationResponses[navigationResponses.length - 1].status : null;
       outcome = classifyLighthouseFailure(error, lastNavigationStatus);
       failureReason = sanitizeDiagnosticMessage(error?.message || error);
-      if (!diagnosticsPersisted) await persistDiagnostics(outcome);
+      if (!diagnosticsPersisted) {
+        try {
+          await persistDiagnostics(outcome);
+        } catch (diagnosticsError: any) {
+          try {
+            console.error('[Lighthouse] Failed to persist diagnostics without replacing the audit error:',
+              sanitizeDiagnosticMessage(diagnosticsError?.message || diagnosticsError));
+          } catch {
+            // Diagnostics and their logging must not replace the original audit error.
+          }
+        }
+      }
       throw error;
     } finally {
       if (chrome) {
         console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Cleaning up Chrome process...`);
         try {
-          await stopChromeAndWait(chrome);
+          await this.dependencies.stopChrome(chrome);
           console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Chrome process exited and cleanup completed`);
         } catch (killErr) {
-          console.error('[Lighthouse] Warning closing Chrome:', sanitizeDiagnosticMessage((killErr as any)?.message || killErr));
-          if (auditError && (typeof auditError === 'object' || typeof auditError === 'function')) {
-            markBrowserCleanupFailure(auditError as object);
-          } else {
+          const cleanupError = new ApiError(500, 'Lighthouse Chrome process cleanup failed');
+          const propagatedError = auditError && (typeof auditError === 'object' || typeof auditError === 'function')
+            ? auditError as object
+            : cleanupError;
+          markBrowserCleanupFailure(propagatedError);
+          try {
+            console.error('[Lighthouse] Warning closing Chrome:', sanitizeDiagnosticMessage((killErr as any)?.message || killErr));
+          } catch {
+            // The propagated error has already been marked for fail-closed handling.
+          }
+          if (propagatedError === cleanupError) {
             outcome = 'AUDIT_FAILED';
             failureReason = 'Lighthouse Chrome process cleanup failed';
             try {
               await persistDiagnostics(outcome);
             } catch (diagnosticsError: any) {
-              console.error('[Lighthouse] Failed to persist browser cleanup failure:', sanitizeDiagnosticMessage(diagnosticsError?.message || diagnosticsError));
+              try {
+                console.error('[Lighthouse] Failed to persist browser cleanup failure:', sanitizeDiagnosticMessage(diagnosticsError?.message || diagnosticsError));
+              } catch {
+                // Keep the marked cleanup error as the propagated failure.
+              }
             }
-            const cleanupError = new ApiError(500, 'Lighthouse Chrome process cleanup failed');
-            markBrowserCleanupFailure(cleanupError);
             throw cleanupError;
           }
         }

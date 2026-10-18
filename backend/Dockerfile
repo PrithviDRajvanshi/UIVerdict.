@@ -1,5 +1,10 @@
 FROM mcr.microsoft.com/playwright:v1.62.1-noble
 
+# Real init so orphaned Chrome processes get reaped
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Copy dependency manifests
@@ -23,4 +28,5 @@ EXPOSE 8080
 
 # Database migrations run as a one-time deployment pre-deploy command (`npm run migrate`).
 # The application container starts only the server to avoid per-replica migration races.
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["npm", "run", "start"]
