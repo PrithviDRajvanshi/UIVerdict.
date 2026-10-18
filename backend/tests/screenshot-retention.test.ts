@@ -32,6 +32,12 @@ async function run() {
     await service.removeScreenshot({ url: 'https://example.com', filename: retained, path: `temp/screenshots/${retained}`, sha256: 'a'.repeat(64) });
     assert.strictEqual(fs.existsSync(path.join(directory, retained)), true, 'opt-in development retention skips immediate removal');
 
+    const analysisArtifact = 'uiverdict-analysis-20261013-000002-example-com-abcdef123458.png';
+    await fs.promises.writeFile(path.join(directory, analysisArtifact), 'temporary');
+    await service.removeScreenshot({ url: 'https://example.com', filename: analysisArtifact, path: `temp/screenshots/${analysisArtifact}`, sha256: 'a'.repeat(64) }, true);
+    assert.strictEqual(fs.existsSync(path.join(directory, analysisArtifact)), false,
+      'analysis pipeline cleanup removes its screenshot even when development retention is enabled');
+
     process.env.NODE_ENV = 'production';
     await service.removeScreenshot({ url: 'https://example.com', filename: retained, path: `temp/screenshots/${retained}`, sha256: 'a'.repeat(64) });
     assert.strictEqual(fs.existsSync(path.join(directory, retained)), false, 'production always removes the temporary screenshot');

@@ -9,6 +9,10 @@ import { TargetPageValidationError } from './target-page-validation';
 import { calculateOverallScore } from './scoring.service';
 import { resolveVerdictLabel } from '../validators/aiAnalysis.validator';
 import { PlaywrightDiagnosticMetadata } from './browser-diagnostics';
+import { AnalysisConcurrencyQueue } from './analysis-concurrency';
+import { ApiError } from '../errors/ApiError';
+
+const processAnalysisQueue = new AnalysisConcurrencyQueue();
 
 export interface AnalysisData {
   id: string;
@@ -30,36 +34,76 @@ export interface AnalysisResponse {
 }
 
 export class AnalysisService {
-  public async analyzeUrl(url: string, userId?: string): Promise<AnalysisResponse> {
+  public async analyzeUrl(url: string, userId?: string, signal?: AbortSignal): Promise<AnalysisResponse> {
     let analysisId: string | null = null;
-    let screenshotData: ScreenshotResult | null = null;
-    const latestPlaywrightDiagnostics: { current: PlaywrightDiagnosticMetadata | null } = { current: null };
-
+    let pipelineStarted = false;
     try {
-      // 1. Create relational analysis record in PostgreSQL (status: PROCESSING)
+      processAnalysisQueue.assertAvailable();
+      if (signal?.aborted) throw new ApiError(503, 'Analysis request was cancelled before processing');
       const { analysis } = await postgresRepository.createAnalysisTransaction(url, 'Default Project', userId);
       analysisId = analysis.id;
       console.log(`[AnalysisService] Analysis initiated in PostgreSQL: ${analysis.id} (Status: ${analysis.status})`);
-
-      // 2. Capture Playwright full page screenshot
-      screenshotData = await playwrightService.captureScreenshot(url, analysisId, (diagnostics) =>
-        (latestPlaywrightDiagnostics.current = diagnostics, postgresRepository.updatePlaywrightDiagnostics(analysis.id, diagnostics).then(() => undefined)));
-      await postgresRepository.updateScreenshotIdentity(analysis.id, screenshotData.filename, screenshotData.sha256);
-      console.log(`[AnalysisService] Screenshot capture completed: ${screenshotData.filename} (${screenshotData.path})`);
-
-      // 3. Run Lighthouse performance, accessibility, best-practices, and SEO audit
-      const metrics: LighthouseMetrics = await lighthouseService.runAudit(url, (diagnostics) =>
-        postgresRepository.updateLighthouseDiagnostics(analysis.id, diagnostics).then(() => undefined));
-      console.log(`[AnalysisService] Lighthouse audit completed for URL: ${sanitizeDiagnosticUrl(url)} (Performance: ${metrics.performance}, Accessibility: ${metrics.accessibility})`);
-
-      // 4. Generate holistic Gemini AI UI/UX evaluation (independent score + qualitative critique)
-      let aiAnalysis: AiAnalysis | null = null;
-      try {
-        aiAnalysis = await geminiService.generateAnalysis({ url, metrics, screenshot: screenshotData });
-        console.log(`[AnalysisService] Gemini AI visual assessment completed for URL: ${sanitizeDiagnosticUrl(url)} (Visual design score: ${aiAnalysis.visualDesignScore})`);
-      } catch (aiError: any) {
-        console.warn(`[AnalysisService] AI feedback unavailable; preserving Lighthouse report: ${sanitizeDiagnosticMessage(aiError?.message || 'unknown error')}`);
+      return await processAnalysisQueue.run(() => {
+        pipelineStarted = true;
+        return this.runAnalysisPipeline(url, analysis, signal);
+      }, { analysisId, url }, signal);
+    } catch (error) {
+      if (analysisId && !pipelineStarted) {
+        try {
+          await postgresRepository.updateAnalysisStatus(analysisId, AnalysisStatus.FAILED);
+          console.log(`[AnalysisService] Marked PostgreSQL analysis ${analysisId} as FAILED before pipeline start`);
+        } catch (statusError: any) {
+          console.error('[AnalysisService] Failed to mark queued analysis as FAILED:', sanitizeDiagnosticMessage(statusError?.message || statusError));
+        }
       }
+      throw error;
+    }
+  }
+
+  private async runAnalysisPipeline(url: string, analysis: { id: string; status: AnalysisStatus }, signal?: AbortSignal): Promise<AnalysisResponse> {
+    const analysisId = analysis.id;
+    let screenshotData: ScreenshotResult | null = null;
+    const latestPlaywrightDiagnostics: { current: PlaywrightDiagnosticMetadata | null } = { current: null };
+    let metrics: LighthouseMetrics;
+    let aiAnalysis: AiAnalysis | null = null;
+
+    try {
+      try {
+        // Playwright resolves only after its browser cleanup completes.
+        if (signal?.aborted) throw new Error('Analysis request was cancelled');
+        screenshotData = await playwrightService.captureScreenshot(url, analysisId, (diagnostics) =>
+          (latestPlaywrightDiagnostics.current = diagnostics, postgresRepository.updatePlaywrightDiagnostics(analysis.id, diagnostics).then(() => undefined)));
+        await postgresRepository.updateScreenshotIdentity(analysis.id, screenshotData.filename, screenshotData.sha256);
+        console.log(`[AnalysisService] Screenshot capture completed: ${screenshotData.filename} (${screenshotData.path})`);
+
+        // Lighthouse resolves only after its Chrome process has exited and cleanup completes.
+        if (signal?.aborted) throw new Error('Analysis request was cancelled');
+        metrics = await lighthouseService.runAudit(url, (diagnostics) =>
+          postgresRepository.updateLighthouseDiagnostics(analysis.id, diagnostics).then(() => undefined));
+        console.log(`[AnalysisService] Lighthouse audit completed for URL: ${sanitizeDiagnosticUrl(url)} (Performance: ${metrics.performance}, Accessibility: ${metrics.accessibility})`);
+        if (signal?.aborted) throw new Error('Analysis request was cancelled');
+
+        // Gemini consumes the persisted screenshot; remove it as soon as this stage ends.
+        try {
+          aiAnalysis = await geminiService.generateAnalysis({ url, metrics, screenshot: screenshotData });
+          console.log(`[AnalysisService] Gemini AI visual assessment completed for URL: ${sanitizeDiagnosticUrl(url)} (Visual design score: ${aiAnalysis.visualDesignScore})`);
+        } catch (aiError: any) {
+          console.warn(`[AnalysisService] AI feedback unavailable; preserving Lighthouse report: ${sanitizeDiagnosticMessage(aiError?.message || 'unknown error')}`);
+        }
+      } finally {
+        if (screenshotData) {
+          try {
+            await playwrightService.removeScreenshot(screenshotData, true);
+          } catch (cleanupError: any) {
+            try {
+              console.error('[AnalysisService] Failed to remove temporary screenshot:', sanitizeDiagnosticMessage(cleanupError?.message || cleanupError));
+            } catch {
+              // Cleanup and its diagnostics must not replace the analysis result or error.
+            }
+          }
+        }
+      }
+      if (signal?.aborted) throw new Error('Analysis request was cancelled');
 
       // 5. Save complete analysis result to PostgreSQL and mark status COMPLETED
       console.log(`[AnalysisService] Persisting complete analysis result to PostgreSQL for analysisId: ${analysis.id}`);
@@ -127,14 +171,6 @@ export class AnalysisService {
         }
       }
       throw error;
-    } finally {
-      if (screenshotData) {
-        try {
-          await playwrightService.removeScreenshot(screenshotData);
-        } catch (cleanupError: any) {
-          console.error('[AnalysisService] Failed to remove temporary screenshot:', sanitizeDiagnosticMessage(cleanupError?.message || cleanupError));
-        }
-      }
     }
   }
 }

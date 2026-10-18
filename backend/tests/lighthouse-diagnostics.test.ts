@@ -25,11 +25,17 @@ async function run() {
   const completedDiagnostics: LighthouseDiagnosticMetadata[] = [];
   const errorPageDiagnostics: LighthouseDiagnosticMetadata[] = [];
   const cleanupWarnings: string[] = [];
+  const cleanupCompletions: string[] = [];
   const originalError = console.error;
+  const originalLog = console.log;
   console.error = ((...args: unknown[]) => {
     if (String(args[0]).includes('Warning closing Chrome')) cleanupWarnings.push(args.map(String).join(' '));
     originalError(...args);
   }) as typeof console.error;
+  console.log = ((...args: unknown[]) => {
+    if (String(args[0]).includes('Chrome process exited and cleanup completed')) cleanupCompletions.push(String(args[0]));
+    originalLog(...args);
+  }) as typeof console.log;
   try {
     const metrics = await service.runAudit(`http://127.0.0.1:${address.port}/`, async (diagnostics) => {
       completedDiagnostics.push(diagnostics);
@@ -38,6 +44,7 @@ async function run() {
     assert.strictEqual(completedDiagnostics.at(-1)?.outcome, 'AUDIT_COMPLETED');
     assert.strictEqual(completedDiagnostics.at(-1)?.navigationResponseStatus, 200);
     assert.strictEqual(completedDiagnostics.at(-1)?.navigationStatusObserved, true);
+    assert.strictEqual(cleanupCompletions.length, 1, 'runAudit resolves only after its Chrome process exits and cleanup completes');
 
     await assert.rejects(() => service.runAudit(`http://127.0.0.1:${address.port}/unavailable`, async (diagnostics) => {
       errorPageDiagnostics.push(diagnostics);
@@ -47,6 +54,7 @@ async function run() {
     assert.deepStrictEqual(cleanupWarnings, [], 'Chrome cleanup must not race temporary profile deletion');
   } finally {
     console.error = originalError;
+    console.log = originalLog;
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
