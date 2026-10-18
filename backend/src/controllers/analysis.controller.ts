@@ -4,10 +4,18 @@ import jwt from 'jsonwebtoken';
 import { config } from '../config/env';
 
 export const analyze = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  const abortController = new AbortController();
+  const abortForIncompleteRequest = () => abortController.abort();
+  const abortForDisconnectedResponse = () => {
+    if (!res.writableEnded) abortController.abort();
+  };
+  req.once('aborted', abortForIncompleteRequest);
+  res.once('close', abortForDisconnectedResponse);
   try {
     const { url } = req.body;
     const userId = req.user?.id;
-    const result = await analysisService.analyzeUrl(url, userId);
+    const result = await analysisService.analyzeUrl(url, userId, abortController.signal);
+    if (res.destroyed) return;
     if (!userId) {
       const analysisId = result.data.id;
       const guestToken = jwt.sign(
@@ -25,6 +33,9 @@ export const analyze = async (req: Request, res: Response, next: NextFunction): 
     }
     res.status(200).json(result);
   } catch (error) {
-    next(error);
+    if (!res.destroyed) next(error);
+  } finally {
+    req.removeListener('aborted', abortForIncompleteRequest);
+    res.removeListener('close', abortForDisconnectedResponse);
   }
 };

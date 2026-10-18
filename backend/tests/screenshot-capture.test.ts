@@ -60,7 +60,13 @@ async function run() {
   try {
     const corsDiagnostics: PlaywrightDiagnosticMetadata[] = [];
     const corsService = new PlaywrightService(5000, 0);
+    const corsLogStart = logs.length;
     const corsScreenshot = await corsService.captureScreenshot(`${pageOrigin}/cors.html`, 'screenshot-cors-test', async (d) => { corsDiagnostics.push(d); });
+    const corsStages = logs.slice(corsLogStart)
+      .filter((entry) => String(entry.args[0]).startsWith('[Playwright] Capture stage '))
+      .map((entry) => entry.args[1] as Record<string, any>);
+    assert.ok(corsStages.some((stage) => stage.stage === 'browser_cleanup' && stage.status === 'succeeded'),
+      'captureScreenshot resolves only after its browser cleanup succeeds');
     try {
       assert.ok(assetRequests.some((entry) => entry.startsWith('GET /resource')),
         'a same-site page can fetch a different origin without the injected Upgrade-Insecure-Requests preflight');

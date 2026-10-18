@@ -11,6 +11,7 @@ import {
   sanitizePlaywrightDiagnostics,
 } from './browser-diagnostics';
 import { TargetPageValidationError, validateTargetPage } from './target-page-validation';
+import { markBrowserCleanupFailure } from './analysis-concurrency';
 
 export interface ScreenshotResult {
   url: string;
@@ -247,6 +248,8 @@ export class PlaywrightService {
 
   public async captureScreenshot(targetUrl: string, analysisId?: string, onDiagnostics?: PlaywrightDiagnosticsCallback): Promise<ScreenshotResult> {
     let browser: Browser | null = null;
+    let operationError: unknown = null;
+    let screenshotArtifactPath: string | null = null;
     const emitDiagnostics = async (stage: string, diagnostics: PlaywrightDiagnosticMetadata): Promise<void> => {
       if (!onDiagnostics) return;
       const startedAt = Date.now();
@@ -500,6 +503,7 @@ export class PlaywrightService {
       const filename = this.generateFilename(targetUrl, analysisId);
       const relativePath = path.join('temp', 'screenshots', filename).replace(/\\/g, '/');
       const absolutePath = path.join(this.tempDir, filename);
+      screenshotArtifactPath = absolutePath;
 
       const screenshotStartedAt = new Date().toISOString();
       let pageDiagnostics: Record<string, unknown> | null = null;
@@ -694,6 +698,9 @@ export class PlaywrightService {
         }
         throw error;
       }
+    } catch (error) {
+      operationError = error;
+      throw error;
     } finally {
       if (browser) {
         const closeStartedAt = Date.now();
@@ -703,13 +710,28 @@ export class PlaywrightService {
           logCaptureStage('browser_cleanup', 'succeeded', targetUrl, closeStartedAt);
         } catch (error) {
           logCaptureStage('browser_cleanup', 'failed', targetUrl, closeStartedAt, error);
+          if (!operationError) {
+            if (screenshotArtifactPath) {
+              try {
+                await fs.promises.unlink(screenshotArtifactPath);
+              } catch (artifactError) {
+                if ((artifactError as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+                  logCaptureStage('screenshot_artifact_cleanup', 'failed', targetUrl, Date.now(), artifactError);
+                }
+              }
+            }
+            const cleanupError = new ApiError(500, 'Failed to close browser after screenshot capture');
+            markBrowserCleanupFailure(cleanupError);
+            throw cleanupError;
+          }
+          if (typeof operationError === 'object' && operationError !== null) markBrowserCleanupFailure(operationError);
         }
       }
     }
   }
 
-  public async removeScreenshot(screenshot: ScreenshotResult): Promise<void> {
-    if (this.developmentRetentionMs() > 0 && screenshot.filename.startsWith('uiverdict-')) return;
+  public async removeScreenshot(screenshot: ScreenshotResult, force = false): Promise<void> {
+    if (!force && this.developmentRetentionMs() > 0 && screenshot.filename.startsWith('uiverdict-')) return;
     const filePath = path.resolve(this.tempDir, screenshot.filename);
     const tempRoot = `${path.resolve(this.tempDir)}${path.sep}`;
     if (!filePath.startsWith(tempRoot)) {

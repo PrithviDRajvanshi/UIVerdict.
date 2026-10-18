@@ -1,6 +1,8 @@
 import * as chromeLauncher from 'chrome-launcher';
+import { execFileSync } from 'child_process';
 import { chromium } from 'playwright';
 import { ApiError } from '../errors/ApiError';
+import { isBrowserCleanupFailure, markBrowserCleanupFailure } from './analysis-concurrency';
 import { normalizeLighthouseCategoryScore } from './scoring.service';
 import {
   classifyLighthouseFailure,
@@ -44,6 +46,44 @@ async function waitForChromeExit(chrome: chromeLauncher.LaunchedChrome, timeoutM
   });
 }
 
+async function stopChromeProcessTreeAndWait(chrome: chromeLauncher.LaunchedChrome, timeoutMs: number): Promise<void> {
+  const pid = chrome.process.pid;
+  if (!pid) throw new Error('Chrome process ID unavailable; process-tree cleanup cannot be confirmed');
+
+  if (process.platform === 'win32') {
+    // chrome-launcher suppresses taskkill errors, so invoke it directly and check the result.
+    try {
+      execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    } catch (error) {
+      // A normally closed root may already be gone before taskkill can enumerate its tree.
+      if (chrome.process.exitCode === null && chrome.process.signalCode === null) throw error;
+    }
+    await waitForChromeExit(chrome, timeoutMs);
+    return;
+  }
+
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'ESRCH') throw error;
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(-pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ESRCH') {
+        await waitForChromeExit(chrome, Math.max(1, deadline - Date.now()));
+        return;
+      }
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('Timed out waiting for the Chrome process tree to exit');
+}
+
 async function requestGracefulChromeShutdown(port: number): Promise<void> {
   const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(3000) });
   if (!response.ok) throw new Error(`Chrome DevTools returned HTTP ${response.status}`);
@@ -68,20 +108,23 @@ async function stopChromeAndWait(chrome: chromeLauncher.LaunchedChrome): Promise
       await requestGracefulChromeShutdown(chrome.port);
       await waitForChromeExit(chrome, 10000);
     } catch {
-      // Fall back to chrome-launcher's platform process-tree termination.
-      chrome.kill();
-      await waitForChromeExit(chrome, 10000);
+      // Fall through to checked process-tree termination below.
     }
   }
 
-  // chrome-launcher owns its temporary profile and signal-handler registry. At this point
-  // the process tree has exited, so its synchronous profile removal no longer races locks.
+  // Confirm the whole process tree is gone. chrome-launcher.kill() suppresses termination
+  // errors, so it cannot be the sole evidence that it is safe to release the queue slot.
+  await stopChromeProcessTreeAndWait(chrome, 10000);
+
+  // chrome-launcher owns its temporary profile and signal-handler registry. Its synchronous
+  // profile removal now runs only after the browser process tree has exited.
   chrome.kill();
 }
 
 export class LighthouseService {
   private async runSingleAudit(targetUrl: string, attempt: number, maxAttempts: number, onDiagnostics?: LighthouseDiagnosticsCallback): Promise<LighthouseMetrics> {
     let chrome: chromeLauncher.LaunchedChrome | null = null;
+    let auditError: unknown = null;
     const navigationResponses: Array<{ url: string; status: number }> = [];
     let finalUrl: string | null = null;
     let auditStartedAt = Date.now();
@@ -213,6 +256,7 @@ export class LighthouseService {
       console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Completed successfully with performance score ${metrics.performance}`);
       return metrics;
     } catch (error: any) {
+      auditError = error;
       auditDurationMs = auditDurationMs ?? Date.now() - auditStartedAt;
       const lastNavigationStatus = navigationResponses.length ? navigationResponses[navigationResponses.length - 1].status : null;
       outcome = classifyLighthouseFailure(error, lastNavigationStatus);
@@ -224,8 +268,23 @@ export class LighthouseService {
         console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Cleaning up Chrome process...`);
         try {
           await stopChromeAndWait(chrome);
+          console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Chrome process exited and cleanup completed`);
         } catch (killErr) {
           console.error('[Lighthouse] Warning closing Chrome:', sanitizeDiagnosticMessage((killErr as any)?.message || killErr));
+          if (auditError && (typeof auditError === 'object' || typeof auditError === 'function')) {
+            markBrowserCleanupFailure(auditError as object);
+          } else {
+            outcome = 'AUDIT_FAILED';
+            failureReason = 'Lighthouse Chrome process cleanup failed';
+            try {
+              await persistDiagnostics(outcome);
+            } catch (diagnosticsError: any) {
+              console.error('[Lighthouse] Failed to persist browser cleanup failure:', sanitizeDiagnosticMessage(diagnosticsError?.message || diagnosticsError));
+            }
+            const cleanupError = new ApiError(500, 'Lighthouse Chrome process cleanup failed');
+            markBrowserCleanupFailure(cleanupError);
+            throw cleanupError;
+          }
         }
       }
     }
@@ -240,6 +299,9 @@ export class LighthouseService {
         return await this.runSingleAudit(targetUrl, attempt, MAX_ATTEMPTS, onDiagnostics);
       } catch (error: any) {
         lastError = error;
+        if (isBrowserCleanupFailure(error)) {
+          throw error;
+        }
         const errMessage = sanitizeDiagnosticMessage(error?.message || 'Unknown Lighthouse error');
         console.error(`[Lighthouse] Attempt ${attempt}/${MAX_ATTEMPTS} failed: ${errMessage}`);
 
