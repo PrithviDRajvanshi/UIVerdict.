@@ -168,7 +168,12 @@ async function testAnalysisPipelineSerialization(): Promise<void> {
       project: {} as any,
       analysis: { id: `concurrency-analysis-${++id}`, status: AnalysisStatus.PROCESSING } as any,
     });
-    postgresRepository.saveAnalysisResult = async (_id, input) => { events.push('persist'); persistedInput = input; return {} as any; };
+    postgresRepository.saveAnalysisResult = async (_id, input) => {
+      events.push('persist');
+      activePipelines -= 1;
+      persistedInput = input;
+      return {} as any;
+    };
     postgresRepository.updateAnalysisStatus = async () => ({} as any);
     postgresRepository.updatePlaywrightDiagnostics = async () => ({} as any);
     postgresRepository.updateLighthouseDiagnostics = async () => ({} as any);
@@ -212,7 +217,6 @@ async function testAnalysisPipelineSerialization(): Promise<void> {
     geminiService.generateAnalysis = async (input) => {
       events.push('gemini:start');
       geminiInputs.push(input);
-      activePipelines -= 1;
       if (input.url.endsWith('/gemini-fail')) throw new Error('forced Gemini failure');
       return { visualDesignScore: 80, qualitativeCritique: [], strengths: [], areasForRefinement: [] };
     };
@@ -227,19 +231,20 @@ async function testAnalysisPipelineSerialization(): Promise<void> {
     const [firstResponse] = await Promise.all([first, second]);
     assert.strictEqual(peakPipelines, 1, 'screenshot, Lighthouse, and Gemini analysis are serialized as one pipeline');
     assert.deepStrictEqual(events.slice(0, 14), [
-      'playwright:start', 'playwright:browser-closed', 'lighthouse:start', 'lighthouse:chrome-closed',
-      'gemini:start', 'screenshot:removed', 'persist',
-      'playwright:start', 'playwright:browser-closed', 'lighthouse:start', 'lighthouse:chrome-closed',
-      'gemini:start', 'screenshot:removed', 'persist',
+      'playwright:start', 'playwright:browser-closed', 'gemini:start', 'screenshot:removed',
+      'lighthouse:start', 'lighthouse:chrome-closed', 'persist',
+      'playwright:start', 'playwright:browser-closed', 'gemini:start', 'screenshot:removed',
+      'lighthouse:start', 'lighthouse:chrome-closed', 'persist',
     ], 'browser cleanup completes before the next stage and screenshot cleanup follows Gemini');
     assert.strictEqual(firstResponse.data.aiStatus, 'AVAILABLE');
     assert.deepStrictEqual(Object.keys(firstResponse.data).sort(), [
-      'aiAnalysis', 'aiStatus', 'id', 'metrics', 'overallScore', 'targetValidationStatus', 'url', 'verdictLabel', 'visualDesignScore',
+      'aiAnalysis', 'aiStatus', 'id', 'metrics', 'overallScore', 'partial', 'targetValidationStatus', 'technicalUnavailable',
+      'technicalUnavailableReason', 'url', 'verdictLabel', 'visualDesignScore',
     ], 'successful response fields remain unchanged');
     assert.strictEqual(persistedInput.screenshotArtifactName, 'test-2.png');
     assert.strictEqual(persistedInput.screenshotSha256, 'a'.repeat(64));
     assert.strictEqual(geminiInputs[0].screenshot.filename, 'test-1.png');
-    assert.strictEqual(geminiInputs[0].metrics.performance, 80, 'Gemini receives the saved screenshot and Lighthouse metrics');
+    assert.strictEqual('metrics' in geminiInputs[0], false, 'Gemini receives no Lighthouse metrics');
 
     const failed = service.analyzeUrl('https://example.com/fail');
     await assert.rejects(failed, /forced screenshot failure/);
@@ -248,23 +253,22 @@ async function testAnalysisPipelineSerialization(): Promise<void> {
 
     const lighthouseEventsStart = events.length;
     screenshotCleanupFailure = new Error('forced screenshot cleanup failure');
-    await assert.rejects(
-      service.analyzeUrl('https://example.com/lighthouse-fail'),
-      (error) => error === lighthouseFailure,
-      'screenshot cleanup failure must not replace the original Lighthouse error',
-    );
+    const lighthousePartial = await service.analyzeUrl('https://example.com/lighthouse-fail');
     screenshotCleanupFailure = null;
+    assert.strictEqual(lighthousePartial.data.technicalUnavailable, true);
+    assert.strictEqual(lighthousePartial.data.partial, true);
     assert.deepStrictEqual(events.slice(lighthouseEventsStart), [
-      'playwright:start', 'playwright:browser-closed', 'lighthouse:start', 'lighthouse:chrome-closed', 'screenshot:removed',
-    ], 'Lighthouse failure cleans the screenshot after browser shutdown and never starts Gemini');
+      'playwright:start', 'playwright:browser-closed', 'gemini:start', 'screenshot:removed',
+      'lighthouse:start', 'lighthouse:chrome-closed', 'persist',
+    ], 'Lighthouse failure creates a partial report after Gemini and screenshot cleanup');
 
     screenshotCleanupFailure = new Error('forced screenshot cleanup failure after Gemini');
     const geminiFallback = await service.analyzeUrl('https://example.com/gemini-fail');
     screenshotCleanupFailure = null;
     assert.strictEqual(geminiFallback.data.aiStatus, 'UNAVAILABLE', 'Gemini keeps its existing Lighthouse-only fallback');
     assert.deepStrictEqual(events.slice(-7), [
-      'playwright:start', 'playwright:browser-closed', 'lighthouse:start', 'lighthouse:chrome-closed',
-      'gemini:start', 'screenshot:removed', 'persist',
+      'playwright:start', 'playwright:browser-closed', 'gemini:start', 'screenshot:removed',
+      'lighthouse:start', 'lighthouse:chrome-closed', 'persist',
     ], 'Gemini failure attempts screenshot cleanup before persisting the fallback report');
 
     const client = new AbortController();

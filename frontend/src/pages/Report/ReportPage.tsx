@@ -69,6 +69,16 @@ export const ReportPage: React.FC = () => {
   }
 
   const presentation = getReportPresentation(report.status, report.aiStatus);
+  const hasLighthouseData = [report.metrics.performance, report.metrics.accessibility, report.metrics.bestPractices, report.metrics.seoStructure]
+    .some((score) => score !== null) || [
+      report.metrics.firstContentfulPaint,
+      report.metrics.largestContentfulPaint,
+      report.metrics.speedIndex,
+      report.metrics.totalBlockingTime,
+      report.metrics.cumulativeLayoutShift,
+      report.metrics.timeToInteractive,
+    ].some((metric) => typeof metric === 'string' && metric.trim() !== '' && metric.toLowerCase() !== 'n/a');
+  const hasVisualScore = report.visualDesignScore !== null;
 
   return (
     <main className="max-w-container-max mx-auto px-margin-desktop py-stack-lg flex flex-col gap-stack-lg">
@@ -101,9 +111,13 @@ export const ReportPage: React.FC = () => {
         <div role="status" className="border border-red-800 bg-red-950/40 p-4 font-mono-data text-sm text-red-200">This analysis failed before a reliable report could be completed.</div>
       ) : null}
 
-      {presentation.aiUnavailable && (
+      {report.status === 'COMPLETED' && (presentation.aiUnavailable || !hasLighthouseData) && (
         <div role="status" className="border border-amber-700 bg-amber-950/40 p-4 font-mono-data text-sm text-amber-200">
-          AI feedback is unavailable for this report. The scores and Web Vitals below come from Lighthouse; no AI critique or overall score was generated.
+          {!hasVisualScore && !hasLighthouseData
+            ? 'No visual score, Lighthouse scores, Web Vitals, or AI critique are available for this report.'
+            : !hasLighthouseData
+            ? `${hasVisualScore ? 'A visual score and visual critique are available' : 'No visual score is available'}${presentation.aiUnavailable ? ', but AI critique is unavailable' : ''}. Lighthouse scores and Web Vitals are unavailable${report.overallScore !== null ? '; the overall score uses visual evidence only' : ''}.`
+            : `${hasVisualScore ? 'A visual score is available' : 'No visual score is available'}, and Lighthouse scores and Web Vitals are available. AI critique is unavailable.`}
         </div>
       )}
 

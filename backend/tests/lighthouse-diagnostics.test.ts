@@ -173,12 +173,66 @@ async function testAbortCleanupFailureIsMarked() {
   assert.strictEqual(killTreeCalls, 1);
 }
 
+async function testMemoryAbortRetriesWithoutPerformance() {
+  const chrome = () => ({
+    process: { pid: 700, exitCode: null, signalCode: null },
+    port: 24000,
+    kill() {},
+  } as any);
+  let launches = 0;
+  const categoryRequests: string[][] = [];
+  let resolveFirstAudit!: () => void;
+  const firstAuditStarted = new Promise<void>((resolve) => { resolveFirstAudit = resolve; });
+  const service = new LighthouseService({
+    launchChrome: async () => { launches++; return chrome(); },
+    runLighthouse: async (_url, flags) => {
+      categoryRequests.push([...(flags.onlyCategories as string[])]);
+      if (categoryRequests.length === 1) {
+        resolveFirstAudit();
+        return new Promise(() => {});
+      }
+      return {
+        lhr: {
+          categories: {
+            accessibility: { score: 0.91 },
+            'best-practices': { score: 0.82 },
+            seo: { score: 0.73 },
+          },
+          audits: {},
+          finalDisplayedUrl: 'https://example.test/',
+          runtimeError: null,
+        },
+        artifacts: {},
+      };
+    },
+    killChromeProcessTree: async () => {},
+    stopChrome: async () => {},
+    auditTimeoutMs: 1000,
+  });
+  const memoryAbort = new AbortController();
+  const audit = service.runAudit('https://example.test/', undefined, memoryAbort.signal);
+  await firstAuditStarted;
+  memoryAbort.abort('memory limit');
+  const metrics = await audit;
+
+  assert.strictEqual(launches, 2, 'the reduced audit starts only after the aborted Chrome is cleaned up');
+  assert.deepStrictEqual(categoryRequests, [
+    ['performance', 'accessibility', 'best-practices', 'seo'],
+    ['accessibility', 'best-practices', 'seo'],
+  ]);
+  assert.strictEqual(metrics.performance, null);
+  assert.strictEqual(metrics.accessibility, 91);
+  assert.strictEqual(metrics.bestPractices, 82);
+  assert.strictEqual(metrics.seo, 73);
+}
+
 async function run() {
   await testProcessGroupWait();
   await testCleanupFailurePropagation();
   await testLauncherKillFailureAfterExit();
   await testAuditTimeoutKillsChromeAndUsesResourceSettings();
   await testAbortCleanupFailureIsMarked();
+  await testMemoryAbortRetriesWithoutPerformance();
   const profileRoot = os.tmpdir();
   const profilesBefore = new Set((await fs.promises.readdir(profileRoot, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory() && entry.name.startsWith('lighthouse.'))

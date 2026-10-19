@@ -13,6 +13,7 @@ import { TargetPageValidationError } from '../src/services/target-page-validatio
 import { markBrowserCleanupFailure } from '../src/services/analysis-concurrency';
 import { analysisService } from '../src/services/analysis.service';
 import { analyze } from '../src/controllers/analysis.controller';
+import { ApiError } from '../src/errors/ApiError';
 
 async function runAnalysisLifecycleTests() {
   const original = {
@@ -207,6 +208,22 @@ async function runAnalysisLifecycleTests() {
       if (previousMemoryLimit === undefined) delete process.env.LIGHTHOUSE_MEMORY_ABORT_BYTES;
       else process.env.LIGHTHOUSE_MEMORY_ABORT_BYTES = previousMemoryLimit;
     }
+
+    statuses.length = 0;
+    cleaned = 0;
+    geminiService.generateAnalysis = async () => { throw new Error('Gemini unavailable'); };
+    lighthouseService.runAudit = async () => { throw new Error('Lighthouse unavailable'); };
+    postgresRepository.saveAnalysisResult = async () => {
+      throw new Error('an unavailable analysis must never persist a completed report');
+    };
+    await assert.rejects(
+      () => service.analyzeUrl('https://example.com/both-unavailable'),
+      (error: unknown) => error instanceof ApiError && error.statusCode === 503
+        && error.message === 'Temporarily unavailable, try again',
+      'when both analysis sources fail, return the compatible 503 error',
+    );
+    assert.deepStrictEqual(statuses, [AnalysisStatus.FAILED], 'both-unavailable analysis is marked FAILED');
+    assert.strictEqual(cleaned, 1, 'screenshot is still removed when both sources fail');
 
     statuses.length = 0;
     let auditCalls = 0;

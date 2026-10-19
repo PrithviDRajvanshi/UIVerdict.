@@ -201,7 +201,7 @@ export class AnalysisService {
       })();
       try {
         metrics = await lighthouseService.runAudit(url, (diagnostics) =>
-          postgresRepository.updateLighthouseDiagnostics(analysis.id, diagnostics).then(() => undefined), auditController.signal);
+          postgresRepository.updateLighthouseDiagnostics(analysis.id, diagnostics).then(() => undefined), auditController.signal, signal);
         console.log(`[AnalysisService] Lighthouse audit completed for URL: ${sanitizeDiagnosticUrl(url)} (Performance: ${metrics.performance}, Accessibility: ${metrics.accessibility})`);
       } catch (lighthouseError: any) {
         if (isBrowserCleanupFailure(lighthouseError) || signal?.aborted) throw lighthouseError;
@@ -226,10 +226,16 @@ export class AnalysisService {
       }
       if (memoryAbortReason) {
         technicalUnavailable = true;
-        metrics = unavailableLighthouseMetrics();
         technicalUnavailableReason = memoryAbortReason;
       }
       if (signal?.aborted) throw new Error('Analysis request was cancelled');
+      const hasTechnicalResult = [metrics.performance, metrics.accessibility, metrics.bestPractices, metrics.seo,
+        metrics.firstContentfulPaint, metrics.largestContentfulPaint, metrics.speedIndex,
+        metrics.totalBlockingTime, metrics.cumulativeLayoutShift, metrics.timeToInteractive]
+        .some((value) => value !== null && value !== '' && !(typeof value === 'string' && value.toLowerCase() === 'n/a'));
+      if (!aiAnalysis && !hasTechnicalResult) {
+        throw new ApiError(503, 'Temporarily unavailable, try again');
+      }
 
       // 5. Save complete analysis result to PostgreSQL and mark status COMPLETED
       console.log(`[AnalysisService] Persisting complete analysis result to PostgreSQL for analysisId: ${analysis.id}`);
@@ -241,6 +247,7 @@ export class AnalysisService {
         screenshotSha256: screenshotData.sha256,
       });
       const overallScore = aiAnalysis ? calculateOverallScore(aiAnalysis.visualDesignScore, metrics) : null;
+      const partial = technicalUnavailable || [metrics.performance, metrics.accessibility, metrics.bestPractices, metrics.seo].some((score) => score === null);
       console.log(`[AnalysisService] PostgreSQL persistence complete. Analysis status marked as COMPLETED.`);
 
       // 6. Final response construction and return
@@ -259,7 +266,7 @@ export class AnalysisService {
           verdictLabel: overallScore === null ? null : resolveVerdictLabel(overallScore),
           visualDesignScore: aiAnalysis?.visualDesignScore ?? null,
           targetValidationStatus: 'VALID',
-          partial: technicalUnavailable,
+          partial,
           technicalUnavailable,
           technicalUnavailableReason,
         },
