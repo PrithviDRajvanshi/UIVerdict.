@@ -98,9 +98,11 @@ export class AnalysisConcurrencyQueue {
       entry.reject(error);
     } finally {
       try {
+        const { rss, heapUsed } = process.memoryUsage();
         this.log('info', '[AnalysisQueue] Analysis released:', {
           ...this.logFields(entry),
           activeDurationMs: Date.now() - activeStartedAt,
+          processMemory: { rssBytes: rss, heapUsedBytes: heapUsed },
         });
       } finally {
         this.active = false;

@@ -1,6 +1,7 @@
 import assert from 'assert';
 import fs from 'fs';
 import path from 'path';
+import sharp from 'sharp';
 import { GeminiService } from '../src/services/gemini.service';
 import { config } from '../src/config/env';
 
@@ -52,6 +53,47 @@ async function run() {
     assert.ok(primaryRequest.config.responseSchema && primaryRequest.config.responseMimeType === 'application/json');
     assert.ok(primaryRequest.config.systemInstruction);
     assert.strictEqual(primaryRequest.config.temperature, 0, 'the qualitative model request uses deterministic sampling settings');
+
+    const largeWidth = 1200;
+    const largeHeight = 1200;
+    const noisyPixels = Buffer.alloc(largeWidth * largeHeight * 3);
+    let randomState = 123456789;
+    for (let i = 0; i < noisyPixels.length; i++) {
+      randomState = (1664525 * randomState + 1013904223) >>> 0;
+      noisyPixels[i] = randomState & 0xff;
+    }
+    const largePng = await sharp(noisyPixels, { raw: { width: largeWidth, height: largeHeight, channels: 3 } })
+      .png({ compressionLevel: 0 }).toBuffer();
+    assert.ok(largePng.byteLength > 1_000_000, 'fixture exceeds the screenshot conversion threshold');
+    await fs.promises.writeFile(screenshotPath, largePng);
+    let largeRequest: any;
+    let preparedDiagnostics: any;
+    const originalInfo = console.info;
+    console.info = ((...args: any[]) => {
+      if (args[0] === '[Gemini] Request prepared:') preparedDiagnostics = args[1];
+    }) as typeof console.info;
+    try {
+      const large = makeService(async (request) => {
+        largeRequest = request;
+        return { text: JSON.stringify(valid) };
+      });
+      await large.service.generateAnalysis(input);
+    } finally {
+      console.info = originalInfo;
+      await fs.promises.writeFile(screenshotPath, Buffer.from('mock image bytes'));
+    }
+    const jpegPart = largeRequest.contents[1].inlineData;
+    const jpegBytes = Buffer.from(jpegPart.data, 'base64');
+    const jpegMetadata = await sharp(jpegBytes).metadata();
+    assert.strictEqual(jpegPart.mimeType, 'image/jpeg', 'large screenshots are sent as JPEG');
+    assert.ok(jpegBytes.byteLength < largePng.byteLength, 'large screenshot is reduced before sending');
+    assert.ok((jpegMetadata.height ?? Infinity) <= 4096 && (jpegMetadata.height ?? Infinity) < largeHeight,
+      'large screenshot is downscaled and its height is capped');
+    assert.ok(preparedDiagnostics.fileReadMs >= 0 && preparedDiagnostics.imageTransformMs >= 0 &&
+      preparedDiagnostics.base64EncodeMs >= 0 && preparedDiagnostics.requestBuildMs >= 0,
+    'file read, image encoding and request construction timings are logged');
+    assert.strictEqual(preparedDiagnostics.timeoutMs, config.geminiTimeoutMs, 'per-attempt timeout is logged');
+    assert.strictEqual(preparedDiagnostics.imageBytesSent, jpegBytes.byteLength, 'logged bytes match the transmitted image');
 
     const independentResult = await makeService(async () => ({ text: JSON.stringify({ ...valid, visualDesignScore: 95 }) })).service.generateAnalysis(input);
     assert.strictEqual(independentResult.visualDesignScore, 95, 'visual score is independent of technical metrics');

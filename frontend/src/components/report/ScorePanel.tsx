@@ -17,13 +17,17 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
   metrics,
   isAuthenticated = true,
 }) => {
-  const hasWebVitals =
-    metrics.firstContentfulPaint ||
-    metrics.largestContentfulPaint ||
-    metrics.speedIndex ||
-    metrics.totalBlockingTime ||
-    metrics.cumulativeLayoutShift != null ||
-    metrics.timeToInteractive;
+  const hasDisplayMetric = (value?: string) => Boolean(value?.trim() && value.trim().toLowerCase() !== 'n/a');
+  const hasWebVitals = [
+    metrics.firstContentfulPaint,
+    metrics.largestContentfulPaint,
+    metrics.speedIndex,
+    metrics.totalBlockingTime,
+    metrics.timeToInteractive,
+  ].some(hasDisplayMetric) || metrics.cumulativeLayoutShift != null;
+  const hasLighthouseScores = [metrics.performance, metrics.accessibility, metrics.bestPractices, metrics.seoStructure]
+    .some((score) => score !== null);
+  const hasLighthouseData = hasLighthouseScores || Boolean(hasWebVitals);
 
   return (
     <div className="md:col-span-4 bg-[#151515] border border-[#2a2a2a] flex flex-col h-full">
@@ -48,7 +52,11 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
             {visualDesignScore === null && overallScore !== null
               ? 'Legacy saved overall score; historical visual score is unavailable'
               : overallScore === null
-              ? 'Unavailable until a visual score and all four Lighthouse categories are present'
+              ? 'Unavailable until scoring evidence is available'
+              : !hasLighthouseData
+              ? 'Overall score uses visual evidence only; Lighthouse data is unavailable'
+              : !hasLighthouseScores
+              ? 'Overall score uses available evidence; Lighthouse category scores are unavailable'
               : 'Equal-weight geometric mean of visual and Lighthouse scores'}
           </p>
         </div>
@@ -63,7 +71,11 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
                 Technical Audit (Lighthouse)
               </span>
               <span className="font-mono-data text-[10px] text-[#777777]">
-                Technical measurements; included in overall only when all dimensions are available
+                {!hasLighthouseData
+                  ? 'Lighthouse measurements are unavailable for this report'
+                  : !hasLighthouseScores
+                  ? 'Web Vitals are available; Lighthouse category scores are unavailable'
+                  : 'Technical measurements; included in overall only when all dimensions are available'}
               </span>
             </div>
             <div>
@@ -112,25 +124,25 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
                   Web Vitals Telemetry
                 </div>
                 <div className="grid grid-cols-2 gap-2 font-mono-data text-[11px]">
-                  {metrics.firstContentfulPaint && (
+                  {hasDisplayMetric(metrics.firstContentfulPaint) && (
                     <div className="bg-[#090909] p-2 border border-[#2a2a2a] flex justify-between">
                       <span className="text-[#888888]">FCP:</span>
                       <span className="text-primary font-bold">{metrics.firstContentfulPaint}</span>
                     </div>
                   )}
-                  {metrics.largestContentfulPaint && (
+                  {hasDisplayMetric(metrics.largestContentfulPaint) && (
                     <div className="bg-[#090909] p-2 border border-[#2a2a2a] flex justify-between">
                       <span className="text-[#888888]">LCP:</span>
                       <span className="text-primary font-bold">{metrics.largestContentfulPaint}</span>
                     </div>
                   )}
-                  {metrics.speedIndex && (
+                  {hasDisplayMetric(metrics.speedIndex) && (
                     <div className="bg-[#090909] p-2 border border-[#2a2a2a] flex justify-between">
                       <span className="text-[#888888]">Speed Index:</span>
                       <span className="text-primary font-bold">{metrics.speedIndex}</span>
                     </div>
                   )}
-                  {metrics.totalBlockingTime && (
+                  {hasDisplayMetric(metrics.totalBlockingTime) && (
                     <div className="bg-[#090909] p-2 border border-[#2a2a2a] flex justify-between">
                       <span className="text-[#888888]">TBT:</span>
                       <span className="text-primary font-bold">{metrics.totalBlockingTime}</span>
@@ -142,7 +154,7 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
                       <span className="text-primary font-bold">{metrics.cumulativeLayoutShift}</span>
                     </div>
                   )}
-                  {metrics.timeToInteractive && (
+                  {hasDisplayMetric(metrics.timeToInteractive) && (
                     <div className="bg-[#090909] p-2 border border-[#2a2a2a] flex justify-between">
                       <span className="text-[#888888]">TTI:</span>
                       <span className="text-primary font-bold">{metrics.timeToInteractive}</span>

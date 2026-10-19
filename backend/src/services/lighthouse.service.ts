@@ -32,6 +32,8 @@ export interface LighthouseMetrics {
 export type LighthouseDiagnosticsCallback = (diagnostics: LighthouseDiagnosticMetadata) => Promise<void>;
 
 const LIGHTHOUSE_AUDIT_TIMEOUT_MS = 120_000;
+const LIGHTHOUSE_CATEGORIES = ['performance', 'accessibility', 'best-practices', 'seo'];
+const MEMORY_RETRY_CATEGORIES = ['accessibility', 'best-practices', 'seo'];
 
 async function logCgroupMemorySnapshot(stage: 'before_launch' | 'after_audit' | 'after_cleanup', attempt: number): Promise<void> {
   try {
@@ -368,7 +370,14 @@ export class LighthouseService {
     }
   }
 
-  private async runSingleAudit(targetUrl: string, attempt: number, maxAttempts: number, onDiagnostics?: LighthouseDiagnosticsCallback, signal?: AbortSignal): Promise<LighthouseMetrics> {
+  private async runSingleAudit(
+    targetUrl: string,
+    attempt: number,
+    maxAttempts: number,
+    onDiagnostics?: LighthouseDiagnosticsCallback,
+    signal?: AbortSignal,
+    onlyCategories: string[] = LIGHTHOUSE_CATEGORIES,
+  ): Promise<LighthouseMetrics> {
     let chrome: chromeLauncher.LaunchedChrome | null = null;
     let auditError: unknown = null;
     let lhrRuntimeError: unknown = null;
@@ -424,7 +433,7 @@ export class LighthouseService {
       const flags = {
         logLevel: 'error' as const,
         output: 'json' as const,
-        onlyCategories: ['performance', 'accessibility', 'best-practices', 'seo'],
+        onlyCategories,
         port: chrome.port,
       };
 
@@ -577,7 +586,12 @@ export class LighthouseService {
     }
   }
 
-  public async runAudit(targetUrl: string, onDiagnostics?: LighthouseDiagnosticsCallback, signal?: AbortSignal): Promise<LighthouseMetrics> {
+  public async runAudit(
+    targetUrl: string,
+    onDiagnostics?: LighthouseDiagnosticsCallback,
+    signal?: AbortSignal,
+    retrySignal?: AbortSignal,
+  ): Promise<LighthouseMetrics> {
     const MAX_ATTEMPTS = 2;
     let lastError: any = null;
 
@@ -586,7 +600,14 @@ export class LighthouseService {
         return await this.runSingleAudit(targetUrl, attempt, MAX_ATTEMPTS, onDiagnostics, signal);
       } catch (error: any) {
         lastError = error;
-        if (isBrowserCleanupFailure(error) || (error instanceof ApiError && error.statusCode === 504) || error?.lighthouseAbort === true) {
+        if (isBrowserCleanupFailure(error) || (error instanceof ApiError && error.statusCode === 504)) {
+          throw error;
+        }
+        if (error?.lighthouseAbort === true) {
+          if (/memory limit/i.test(String(error.message || ''))) {
+            console.warn('[Lighthouse] Retrying once without the performance category after a memory abort');
+            return this.runSingleAudit(targetUrl, 1, 1, onDiagnostics, retrySignal, MEMORY_RETRY_CATEGORIES);
+          }
           throw error;
         }
         const errMessage = sanitizeDiagnosticMessage(error?.message || 'Unknown Lighthouse error');

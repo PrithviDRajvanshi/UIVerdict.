@@ -6,6 +6,10 @@ import { UI_VERDICT_SYSTEM_PROMPT, generateUserPrompt } from '../prompts/uiVerdi
 import { aiAnalysisSchema, AiAnalysis } from '../validators/aiAnalysis.validator';
 import fs from 'fs';
 import path from 'path';
+import sharp from 'sharp';
+
+const SCREENSHOT_DOWNSCALE_THRESHOLD_BYTES = 1_000_000;
+const GEMINI_IMAGE_MAX_HEIGHT = 4096;
 
 export interface GeminiInputData {
   url: string;
@@ -72,7 +76,15 @@ export class GeminiService {
       .replace(/https?:\/\/\S+/g, '[url]').replace(/\s+/g, ' ').slice(0, 240);
   }
 
-  private loadScreenshotPart(screenshot: ScreenshotResult): { inlineData: { mimeType: string; data: string } } {
+  private async loadScreenshotPart(screenshot: ScreenshotResult): Promise<{
+    part: { inlineData: { mimeType: string; data: string } };
+    fileReadMs: number;
+    imageTransformMs: number;
+    base64EncodeMs: number;
+    sourceBytes: number;
+    imageBytesSent: number;
+    base64BytesSent: number;
+  }> {
     if (!screenshot || (!screenshot.path && !screenshot.filename)) {
       throw new ApiError(500, 'Screenshot evidence metadata is missing');
     }
@@ -104,23 +116,54 @@ export class GeminiService {
       throw new ApiError(500, 'Screenshot evidence file not found for multimodal analysis');
     }
 
+    const readStartedAt = Date.now();
     let imageBuffer: Buffer;
     try {
-      imageBuffer = fs.readFileSync(targetPath);
+      imageBuffer = await fs.promises.readFile(targetPath);
     } catch (err: any) {
       console.error('[Gemini] Failed to read screenshot evidence file:', err?.message || err);
       throw new ApiError(500, 'Failed to read screenshot evidence file');
     }
+    const fileReadMs = Date.now() - readStartedAt;
 
     if (!imageBuffer || imageBuffer.length === 0) {
       throw new ApiError(500, 'Screenshot evidence file is empty');
     }
 
+    const sourceBytes = imageBuffer.byteLength;
+    const transformStartedAt = Date.now();
+    let imageBytes = imageBuffer;
+    let mimeType = 'image/png';
+    if (sourceBytes > SCREENSHOT_DOWNSCALE_THRESHOLD_BYTES) {
+      try {
+        const image = sharp(imageBuffer, { limitInputPixels: 40_000_000 });
+        const metadata = await image.metadata();
+        if (!metadata.height) throw new Error('Screenshot height unavailable');
+        const targetHeight = Math.min(GEMINI_IMAGE_MAX_HEIGHT, Math.max(1, Math.floor(metadata.height * 0.75)));
+        imageBytes = await image
+          .rotate()
+          .resize({ height: targetHeight, withoutEnlargement: true })
+          .jpeg({ quality: 80 })
+          .toBuffer();
+        mimeType = 'image/jpeg';
+      } catch (error: any) {
+        console.error('[Gemini] Failed to downscale large screenshot:', this.sanitizedError(error));
+        throw new ApiError(500, 'Failed to prepare screenshot for Gemini analysis');
+      }
+    }
+    const imageTransformMs = Date.now() - transformStartedAt;
+    const base64StartedAt = Date.now();
+    const base64 = imageBytes.toString('base64');
+    const base64EncodeMs = Date.now() - base64StartedAt;
+
     return {
-      inlineData: {
-        mimeType: 'image/png',
-        data: imageBuffer.toString('base64'),
-      },
+      part: { inlineData: { mimeType, data: base64 } },
+      fileReadMs,
+      imageTransformMs,
+      base64EncodeMs,
+      sourceBytes,
+      imageBytesSent: imageBytes.byteLength,
+      base64BytesSent: Buffer.byteLength(base64, 'utf8'),
     };
   }
 
@@ -133,14 +176,49 @@ export class GeminiService {
   ): Promise<AiAnalysis> {
     const startedAt = Date.now();
 
+    console.info('[Gemini] Attempt started:', { model, attempt, maxAttempts, timeoutMs });
+    const clientStartedAt = Date.now();
     const client = this.getClient();
+    const clientInitMs = Date.now() - clientStartedAt;
+    const promptStartedAt = Date.now();
     const userPrompt = generateUserPrompt(input);
-    const screenshotPart = this.loadScreenshotPart(input.screenshot);
+    const promptBuildMs = Date.now() - promptStartedAt;
+    const screenshotPart = await this.loadScreenshotPart(input.screenshot);
 
+    const requestBuildStartedAt = Date.now();
     const contents = [
       { text: userPrompt },
-      screenshotPart,
+      screenshotPart.part,
     ];
+    const request = {
+      model,
+      contents,
+      config: {
+        temperature: 0,
+        responseMimeType: 'application/json',
+        responseSchema,
+        systemInstruction: UI_VERDICT_SYSTEM_PROMPT,
+        abortSignal: undefined as AbortSignal | undefined,
+        httpOptions: { timeout: timeoutMs },
+      },
+    };
+    const requestBuildMs = Date.now() - requestBuildStartedAt;
+    console.info('[Gemini] Request prepared:', {
+      model,
+      attempt,
+      maxAttempts,
+      timeoutMs,
+      clientInitMs,
+      promptBuildMs,
+      fileReadMs: screenshotPart.fileReadMs,
+      imageTransformMs: screenshotPart.imageTransformMs,
+      base64EncodeMs: screenshotPart.base64EncodeMs,
+      requestBuildMs,
+      sourceBytes: screenshotPart.sourceBytes,
+      imageBytesSent: screenshotPart.imageBytesSent,
+      base64BytesSent: screenshotPart.base64BytesSent,
+      mimeType: screenshotPart.part.inlineData.mimeType,
+    });
 
     const abortController = new AbortController();
     let timer: NodeJS.Timeout | null = null;
@@ -150,27 +228,18 @@ export class GeminiService {
       timer = setTimeout(() => {
         didTimeout = true;
         abortController.abort();
-        reject(new Error(`[Gemini] Request timed out after ${timeoutMs}ms`));
+        reject(new Error(`Gemini request timed out after ${timeoutMs}ms`));
       }, timeoutMs);
     });
 
     try {
-      const apiPromise = client.models.generateContent({
-        model,
-        contents,
-        config: {
-          temperature: 0,
-          responseMimeType: 'application/json',
-          responseSchema: responseSchema,
-          systemInstruction: UI_VERDICT_SYSTEM_PROMPT,
-          abortSignal: abortController.signal,
-          httpOptions: {
-            timeout: timeoutMs,
-          },
-        },
-      });
+      request.config.abortSignal = abortController.signal;
+      const requestStartedAt = Date.now();
+      console.info('[Gemini] Sending request:', { model, attempt, maxAttempts, timeoutMs });
+      const apiPromise = client.models.generateContent(request);
 
       const response = await Promise.race([apiPromise, timeoutPromise]);
+      const requestDurationMs = Date.now() - requestStartedAt;
 
       const responseText = response.text;
       if (!responseText) {
@@ -197,7 +266,9 @@ export class GeminiService {
 
       aiResult.visualDesignScore = Math.round(aiResult.visualDesignScore * 10) / 10;
 
-      console.info(`[Gemini] model=${model} attempt=${attempt}/${maxAttempts} elapsed_ms=${Date.now() - startedAt} status=200 result=success`);
+      console.info('[Gemini] Attempt succeeded:', {
+        model, attempt, maxAttempts, timeoutMs, requestDurationMs, elapsedMs: Date.now() - startedAt, status: 200,
+      });
       return aiResult;
     } catch (error: any) {
       if (timer) {
@@ -206,7 +277,10 @@ export class GeminiService {
       }
 
       if (error instanceof ApiError) {
-        console.error(`[Gemini] model=${model} attempt=${attempt}/${maxAttempts} elapsed_ms=${Date.now() - startedAt} status=${error.statusCode} error=${this.sanitizedError(error)}`);
+        console.error('[Gemini] Attempt failed:', {
+          model, attempt, maxAttempts, timeoutMs, elapsedMs: Date.now() - startedAt,
+          status: error.statusCode, message: this.sanitizedError(error),
+        });
         throw error;
       }
 
@@ -218,7 +292,7 @@ export class GeminiService {
         String(error?.message || '').toLowerCase().includes('timeout');
 
       if (isTimeout) {
-        console.error(`[Gemini] Request timed out after ${timeoutMs}ms`);
+        console.error('[Gemini] Attempt timed out:', { model, attempt, maxAttempts, timeoutMs });
         const timeoutError: any = new ApiError(503, `Gemini request timed out after ${timeoutMs}ms`);
         timeoutError.transient = true;
         throw timeoutError;
@@ -226,7 +300,10 @@ export class GeminiService {
 
       const status = this.statusOf(error);
       const message = this.sanitizedError(error);
-      console.error(`[Gemini] model=${model} attempt=${attempt}/${maxAttempts} elapsed_ms=${Date.now() - startedAt} status=${status || 'n/a'} error=${message}`);
+      console.error('[Gemini] Attempt failed:', {
+        model, attempt, maxAttempts, timeoutMs, elapsedMs: Date.now() - startedAt,
+        status: status || 'n/a', message,
+      });
       if (status === 401 || status === 403 || /api[_ ]key|permission_denied|unauthorized|forbidden/i.test(message)) {
         throw new ApiError(502, 'Gemini authentication or permission failure');
       }
