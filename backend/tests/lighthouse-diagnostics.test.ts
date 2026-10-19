@@ -104,10 +104,53 @@ async function testLauncherKillFailureAfterExit() {
   }
 }
 
+async function testAuditTimeoutKillsChromeAndUsesResourceSettings() {
+  const chrome = {
+    process: { pid: 654, exitCode: null, signalCode: null },
+    port: 23456,
+    kill() {},
+  } as any;
+  let launchOptions: any;
+  let lighthouseFlags: any;
+  let lighthouseConfig: any;
+  let killTreeCalls = 0;
+  let lighthouseCalls = 0;
+  const service = new LighthouseService({
+    launchChrome: async (options: any) => { launchOptions = options; return chrome; },
+    runLighthouse: async (_url, flags, config) => {
+      lighthouseCalls++;
+      lighthouseFlags = flags;
+      lighthouseConfig = config;
+      return new Promise(() => {});
+    },
+    killChromeProcessTree: async () => { killTreeCalls++; },
+    stopChrome: async () => {},
+    auditTimeoutMs: 10,
+  });
+
+  await assert.rejects(
+    service.runAudit('https://example.test/'),
+    (error: any) => error instanceof ApiError && error.statusCode === 504 && /timeout/.test(error.message),
+    'audit timeout should fail with the compatible gateway timeout error',
+  );
+  assert.strictEqual(lighthouseCalls, 1, 'a timeout should fail fast without retrying the audit');
+  assert.strictEqual(killTreeCalls, 1, 'the Chrome process tree is terminated before timeout propagation');
+  assert.ok(launchOptions.chromeFlags.includes('--renderer-process-limit=1'));
+  assert.ok(launchOptions.chromeFlags.includes('--disable-extensions'));
+  assert.ok(launchOptions.chromeFlags.includes('--disable-background-networking'));
+  assert.ok(launchOptions.chromeFlags.includes('--disable-component-update'));
+  assert.strictEqual(launchOptions.chromeFlags.includes('--disable-features=site-per-process'), false,
+    'site isolation remains enabled');
+  assert.strictEqual(lighthouseConfig.settings.disableFullPageScreenshot, true);
+  assert.deepStrictEqual(lighthouseConfig.settings.skipAudits, ['screenshot-thumbnails']);
+  assert.deepStrictEqual(lighthouseFlags.onlyCategories, ['performance', 'accessibility', 'best-practices', 'seo']);
+}
+
 async function run() {
   await testProcessGroupWait();
   await testCleanupFailurePropagation();
   await testLauncherKillFailureAfterExit();
+  await testAuditTimeoutKillsChromeAndUsesResourceSettings();
   const profileRoot = os.tmpdir();
   const profilesBefore = new Set((await fs.promises.readdir(profileRoot, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory() && entry.name.startsWith('lighthouse.'))
