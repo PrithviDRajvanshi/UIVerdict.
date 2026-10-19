@@ -1,7 +1,6 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import { config } from '../config/env';
 import { ApiError } from '../errors/ApiError';
-import { LighthouseMetrics } from './lighthouse.service';
 import { ScreenshotResult } from './playwright.service';
 import { UI_VERDICT_SYSTEM_PROMPT, generateUserPrompt } from '../prompts/uiVerdict.prompt';
 import { aiAnalysisSchema, AiAnalysis } from '../validators/aiAnalysis.validator';
@@ -10,7 +9,6 @@ import path from 'path';
 
 export interface GeminiInputData {
   url: string;
-  metrics: LighthouseMetrics;
   screenshot: ScreenshotResult;
 }
 

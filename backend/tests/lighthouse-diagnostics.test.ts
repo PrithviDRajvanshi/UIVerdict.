@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 import { LighthouseDiagnosticMetadata } from '../src/services/browser-diagnostics';
 import { LighthouseService, stopChromeAndWait, waitForLinuxProcessGroupExit } from '../src/services/lighthouse.service';
-import { AnalysisConcurrencyQueue } from '../src/services/analysis-concurrency';
+import { AnalysisConcurrencyQueue, isBrowserCleanupFailure } from '../src/services/analysis-concurrency';
 import { ApiError } from '../src/errors/ApiError';
 
 async function testProcessGroupWait() {
@@ -146,11 +146,39 @@ async function testAuditTimeoutKillsChromeAndUsesResourceSettings() {
   assert.deepStrictEqual(lighthouseFlags.onlyCategories, ['performance', 'accessibility', 'best-practices', 'seo']);
 }
 
+async function testAbortCleanupFailureIsMarked() {
+  const chrome = {
+    process: { pid: 655, exitCode: null, signalCode: null },
+    port: 23457,
+    kill() {},
+  } as any;
+  let resolveAuditStarted!: () => void;
+  const auditStarted = new Promise<void>((resolve) => { resolveAuditStarted = resolve; });
+  let killTreeCalls = 0;
+  const service = new LighthouseService({
+    launchChrome: async () => chrome,
+    runLighthouse: async () => {
+      resolveAuditStarted();
+      return new Promise(() => {});
+    },
+    killChromeProcessTree: async () => { killTreeCalls++; throw new Error('could not confirm process exit'); },
+    stopChrome: async () => {},
+  });
+  const controller = new AbortController();
+  const audit = service.runAudit('https://example.test/', undefined, controller.signal);
+  await auditStarted;
+  controller.abort('memory limit');
+  await assert.rejects(audit, (error: unknown) => isBrowserCleanupFailure(error) && /memory limit/.test((error as Error).message),
+    'cleanup failure while aborting Lighthouse marks the original abort error for fail-closed handling');
+  assert.strictEqual(killTreeCalls, 1);
+}
+
 async function run() {
   await testProcessGroupWait();
   await testCleanupFailurePropagation();
   await testLauncherKillFailureAfterExit();
   await testAuditTimeoutKillsChromeAndUsesResourceSettings();
+  await testAbortCleanupFailureIsMarked();
   const profileRoot = os.tmpdir();
   const profilesBefore = new Set((await fs.promises.readdir(profileRoot, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory() && entry.name.startsWith('lighthouse.'))

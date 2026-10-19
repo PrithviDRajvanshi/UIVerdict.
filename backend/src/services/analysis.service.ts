@@ -11,8 +11,47 @@ import { resolveVerdictLabel } from '../validators/aiAnalysis.validator';
 import { PlaywrightDiagnosticMetadata } from './browser-diagnostics';
 import { AnalysisConcurrencyQueue } from './analysis-concurrency';
 import { ApiError } from '../errors/ApiError';
+import fs from 'fs/promises';
+import { isBrowserCleanupFailure } from './analysis-concurrency';
 
 const processAnalysisQueue = new AnalysisConcurrencyQueue();
+const DEFAULT_LIGHTHOUSE_MEMORY_ABORT_BYTES = 850_000_000;
+
+type MemoryAnonReader = () => Promise<number | null>;
+
+async function readCgroupAnonBytes(): Promise<number | null> {
+  try {
+    const stat = await fs.readFile('/sys/fs/cgroup/memory.stat', 'utf8');
+    const anonLine = stat.split(/\r?\n/).find((line) => line.startsWith('anon '));
+    if (!anonLine) return null;
+    const bytes = Number(anonLine.trim().split(/\s+/)[1]);
+    return Number.isFinite(bytes) ? bytes : null;
+  } catch {
+    return null;
+  }
+}
+
+function lighthouseMemoryThresholdBytes(): number {
+  const raw = process.env.LIGHTHOUSE_MEMORY_ABORT_BYTES;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_LIGHTHOUSE_MEMORY_ABORT_BYTES;
+  const configured = Number(raw);
+  return Number.isFinite(configured) && configured >= 0 ? configured : DEFAULT_LIGHTHOUSE_MEMORY_ABORT_BYTES;
+}
+
+function unavailableLighthouseMetrics(): LighthouseMetrics {
+  return {
+    performance: null,
+    accessibility: null,
+    bestPractices: null,
+    seo: null,
+    firstContentfulPaint: null,
+    largestContentfulPaint: null,
+    speedIndex: null,
+    totalBlockingTime: null,
+    cumulativeLayoutShift: null,
+    timeToInteractive: null,
+  };
+}
 
 export interface AnalysisData {
   id: string;
@@ -24,6 +63,9 @@ export interface AnalysisData {
   verdictLabel: string | null;
   visualDesignScore: number | null;
   targetValidationStatus: 'VALID' | 'BLOCKED' | 'INCONCLUSIVE';
+  partial: boolean;
+  technicalUnavailable: boolean;
+  technicalUnavailableReason: string | null;
 }
 
 export interface AnalysisResponse {
@@ -34,6 +76,12 @@ export interface AnalysisResponse {
 }
 
 export class AnalysisService {
+  constructor(private readonly memoryMonitor: {
+    readAnonBytes?: MemoryAnonReader;
+    pollIntervalMs?: number;
+    onStop?: () => void;
+  } = {}) {}
+
   public async analyzeUrl(url: string, userId?: string, signal?: AbortSignal): Promise<AnalysisResponse> {
     let analysisId: string | null = null;
     let pipelineStarted = false;
@@ -66,6 +114,8 @@ export class AnalysisService {
     const latestPlaywrightDiagnostics: { current: PlaywrightDiagnosticMetadata | null } = { current: null };
     let metrics: LighthouseMetrics;
     let aiAnalysis: AiAnalysis | null = null;
+    let technicalUnavailable = false;
+    let technicalUnavailableReason: string | null = null;
 
     try {
       try {
@@ -76,19 +126,14 @@ export class AnalysisService {
         await postgresRepository.updateScreenshotIdentity(analysis.id, screenshotData.filename, screenshotData.sha256);
         console.log(`[AnalysisService] Screenshot capture completed: ${screenshotData.filename} (${screenshotData.path})`);
 
-        // Lighthouse resolves only after its Chrome process has exited and cleanup completes.
-        if (signal?.aborted) throw new Error('Analysis request was cancelled');
-        metrics = await lighthouseService.runAudit(url, (diagnostics) =>
-          postgresRepository.updateLighthouseDiagnostics(analysis.id, diagnostics).then(() => undefined));
-        console.log(`[AnalysisService] Lighthouse audit completed for URL: ${sanitizeDiagnosticUrl(url)} (Performance: ${metrics.performance}, Accessibility: ${metrics.accessibility})`);
         if (signal?.aborted) throw new Error('Analysis request was cancelled');
 
-        // Gemini consumes the persisted screenshot; remove it as soon as this stage ends.
+        // Gemini receives visual evidence only. Keep the screenshot until the request and fallback finish.
         try {
-          aiAnalysis = await geminiService.generateAnalysis({ url, metrics, screenshot: screenshotData });
+          aiAnalysis = await geminiService.generateAnalysis({ url, screenshot: screenshotData });
           console.log(`[AnalysisService] Gemini AI visual assessment completed for URL: ${sanitizeDiagnosticUrl(url)} (Visual design score: ${aiAnalysis.visualDesignScore})`);
         } catch (aiError: any) {
-          console.warn(`[AnalysisService] AI feedback unavailable; preserving Lighthouse report: ${sanitizeDiagnosticMessage(aiError?.message || 'unknown error')}`);
+          console.warn(`[AnalysisService] AI feedback unavailable: ${sanitizeDiagnosticMessage(aiError?.message || 'unknown error')}`);
         }
       } finally {
         if (screenshotData) {
@@ -102,6 +147,87 @@ export class AnalysisService {
             }
           }
         }
+      }
+      if (signal?.aborted) throw new Error('Analysis request was cancelled');
+
+      // Lighthouse owns its Chrome process. The monitor aborts through LighthouseService,
+      // which kills and waits for the process tree before this stage can resolve.
+      const auditController = new AbortController();
+      let pollerStopped = false;
+      let pollTimer: NodeJS.Timeout | undefined;
+      let wakePoller: (() => void) | undefined;
+      let memoryAbortReason: string | null = null;
+      const thresholdBytes = lighthouseMemoryThresholdBytes();
+      const externalAbort = () => auditController.abort(signal?.reason ?? 'request cancelled');
+      if (signal?.aborted) externalAbort();
+      else signal?.addEventListener('abort', externalAbort, { once: true });
+      const pollIntervalMs = this.memoryMonitor.pollIntervalMs ?? 1000;
+      const poller = (async () => {
+        while (!pollerStopped) {
+          await new Promise<void>((resolve) => {
+            let settled = false;
+            const wake = () => {
+              if (settled) return;
+              settled = true;
+              wakePoller = undefined;
+              resolve();
+            };
+            wakePoller = wake;
+            pollTimer = setTimeout(wake, pollIntervalMs);
+          });
+          if (pollerStopped) return;
+          let anonBytes: number | null = null;
+          try {
+            anonBytes = await (this.memoryMonitor.readAnonBytes ?? readCgroupAnonBytes)();
+          } catch {
+            // Memory monitoring is best-effort; unreadable cgroup data is skipped silently.
+          }
+          if (pollerStopped) return;
+          if (anonBytes !== null && anonBytes > thresholdBytes) {
+            memoryAbortReason = 'memory limit';
+            try {
+              console.warn('[AnalysisService] Lighthouse memory limit reached; aborting Chrome audit:', {
+                analysisId,
+                anonBytes,
+                thresholdBytes,
+              });
+            } catch {
+              // Logging must not prevent the memory abort.
+            }
+            auditController.abort(memoryAbortReason);
+            return;
+          }
+        }
+      })();
+      try {
+        metrics = await lighthouseService.runAudit(url, (diagnostics) =>
+          postgresRepository.updateLighthouseDiagnostics(analysis.id, diagnostics).then(() => undefined), auditController.signal);
+        console.log(`[AnalysisService] Lighthouse audit completed for URL: ${sanitizeDiagnosticUrl(url)} (Performance: ${metrics.performance}, Accessibility: ${metrics.accessibility})`);
+      } catch (lighthouseError: any) {
+        if (isBrowserCleanupFailure(lighthouseError) || signal?.aborted) throw lighthouseError;
+        technicalUnavailable = true;
+        metrics = unavailableLighthouseMetrics();
+        technicalUnavailableReason = memoryAbortReason ?? sanitizeDiagnosticMessage(lighthouseError?.message || 'Lighthouse audit unavailable').slice(0, 160);
+        console.warn('[AnalysisService] Continuing with a partial visual report because Lighthouse is unavailable:', {
+          analysisId,
+          reason: technicalUnavailableReason,
+        });
+      } finally {
+        pollerStopped = true;
+        if (pollTimer) clearTimeout(pollTimer);
+        wakePoller?.();
+        signal?.removeEventListener('abort', externalAbort);
+        await poller;
+        try {
+          this.memoryMonitor.onStop?.();
+        } catch {
+          // The monitor hook must not mask the Lighthouse result or failure.
+        }
+      }
+      if (memoryAbortReason) {
+        technicalUnavailable = true;
+        metrics = unavailableLighthouseMetrics();
+        technicalUnavailableReason = memoryAbortReason;
       }
       if (signal?.aborted) throw new Error('Analysis request was cancelled');
 
@@ -120,7 +246,9 @@ export class AnalysisService {
       // 6. Final response construction and return
       return {
         status: 'success',
-        message: aiAnalysis ? 'Analysis completed successfully' : 'Lighthouse analysis completed; AI feedback is unavailable',
+        message: technicalUnavailable
+          ? 'Analysis completed with partial technical results'
+          : aiAnalysis ? 'Analysis completed successfully' : 'Lighthouse analysis completed; AI feedback is unavailable',
         data: {
           id: analysis.id,
           url,
@@ -131,6 +259,9 @@ export class AnalysisService {
           verdictLabel: overallScore === null ? null : resolveVerdictLabel(overallScore),
           visualDesignScore: aiAnalysis?.visualDesignScore ?? null,
           targetValidationStatus: 'VALID',
+          partial: technicalUnavailable,
+          technicalUnavailable,
+          technicalUnavailableReason,
         },
       };
     } catch (error: any) {
@@ -159,6 +290,9 @@ export class AnalysisService {
             verdictLabel: null,
             visualDesignScore: null,
             targetValidationStatus: error.validation.status,
+            partial: false,
+            technicalUnavailable: false,
+            technicalUnavailableReason: null,
           },
         };
       }

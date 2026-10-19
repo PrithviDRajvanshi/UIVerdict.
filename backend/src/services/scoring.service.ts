@@ -11,7 +11,8 @@ export function normalizeLighthouseCategoryScore(score: number | null | undefine
  * Each required dimension has equal weight via a geometric mean. If any
  * dimension is below 40, the final score is capped at 59.9 so strong results
  * elsewhere cannot hide a critical weakness. If an input is unavailable, no
- * overall score is emitted; unavailable is never treated as zero.
+ * overall score is emitted; unavailable is never treated as zero. If all
+ * Lighthouse categories are unavailable, a visual-only partial score is used.
  */
 export function calculateOverallScore(visualDesignScore: number | null, metrics: Pick<LighthouseMetrics,
   'performance' | 'accessibility' | 'bestPractices' | 'seo'>): number | null {
@@ -19,6 +20,10 @@ export function calculateOverallScore(visualDesignScore: number | null, metrics:
 
   if (values.some((value) => value !== null && (!Number.isFinite(value) || value < 0 || value > 100))) {
     throw new Error('Scoring inputs must be finite numbers between 0 and 100, or null for unavailable measurements');
+  }
+
+  if (visualDesignScore !== null && values.slice(1).every((value) => value === null)) {
+    return Math.round(visualDesignScore * 10) / 10;
   }
 
   if (values.some((value) => value === null)) return null;
