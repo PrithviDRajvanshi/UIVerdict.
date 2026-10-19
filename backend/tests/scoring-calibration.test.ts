@@ -20,6 +20,8 @@ function run() {
   assert.strictEqual(calculateOverallScore(89.94, complete(89.94)), 89.9);
   assert.strictEqual(calculateOverallScore(80, { ...complete(80), seo: null }), null, 'overall requires every dimension');
   assert.strictEqual(calculateOverallScore(null, complete(90)), null, 'missing visual score is not replaced');
+  assert.strictEqual(calculateOverallScore(84, { performance: null, accessibility: null, bestPractices: null, seo: null }), 84,
+    'Lighthouse-unavailable reports retain the visual score as a partial overall score');
   assert.strictEqual(calculateOverallScore(0, complete(100)), 0, 'measured zero is valid');
   assert.throws(() => calculateOverallScore(101, complete(80)), /finite numbers/);
   assert.throws(() => calculateOverallScore(Number.NaN, complete(80)), /finite numbers/);

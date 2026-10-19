@@ -21,12 +21,12 @@ export interface LighthouseMetrics {
   accessibility: number | null;
   bestPractices: number | null;
   seo: number | null;
-  firstContentfulPaint: string;
-  largestContentfulPaint: string;
-  speedIndex: string;
-  totalBlockingTime: string;
-  cumulativeLayoutShift: string;
-  timeToInteractive: string;
+  firstContentfulPaint: string | null;
+  largestContentfulPaint: string | null;
+  speedIndex: string | null;
+  totalBlockingTime: string | null;
+  cumulativeLayoutShift: string | null;
+  timeToInteractive: string | null;
 }
 
 export type LighthouseDiagnosticsCallback = (diagnostics: LighthouseDiagnosticMetadata) => Promise<void>;
@@ -307,6 +307,7 @@ export class LighthouseService {
     flags: Record<string, unknown>,
     config: Record<string, unknown>,
     chrome: chromeLauncher.LaunchedChrome,
+    signal?: AbortSignal,
   ): Promise<any> {
     let timeout: NodeJS.Timeout | undefined;
     const audit = Promise.resolve().then(() => this.dependencies.runLighthouse(targetUrl, flags, config));
@@ -335,14 +336,39 @@ export class LighthouseService {
       }, this.dependencies.auditTimeoutMs);
     });
 
+    let abortListener: (() => void) | undefined;
+    const abortPromise = new Promise<never>((_resolve, reject) => {
+      const rejectAfterCleanup = async () => {
+        const reason = typeof signal?.reason === 'string' ? signal.reason : 'cancelled';
+        const abortError = new ApiError(503, `Lighthouse audit aborted: ${reason}`);
+        (abortError as ApiError & { lighthouseAbort?: boolean }).lighthouseAbort = true;
+        try {
+          await this.dependencies.killChromeProcessTree(chrome, 10000);
+        } catch (cleanupError) {
+          markBrowserCleanupFailure(abortError);
+          try {
+            console.error('[Lighthouse] Failed to confirm Chrome process-tree termination after audit abort:',
+              sanitizeDiagnosticMessage((cleanupError as any)?.message || cleanupError));
+          } catch {
+            // Preserve the abort error and its fail-closed marker.
+          }
+        }
+        reject(abortError);
+      };
+      abortListener = () => { void rejectAfterCleanup(); };
+      if (signal?.aborted) abortListener();
+      else signal?.addEventListener('abort', abortListener, { once: true });
+    });
+
     try {
-      return await Promise.race([audit, timeoutPromise]);
+      return await Promise.race([audit, timeoutPromise, abortPromise]);
     } finally {
       if (timeout) clearTimeout(timeout);
+      if (abortListener) signal?.removeEventListener('abort', abortListener);
     }
   }
 
-  private async runSingleAudit(targetUrl: string, attempt: number, maxAttempts: number, onDiagnostics?: LighthouseDiagnosticsCallback): Promise<LighthouseMetrics> {
+  private async runSingleAudit(targetUrl: string, attempt: number, maxAttempts: number, onDiagnostics?: LighthouseDiagnosticsCallback, signal?: AbortSignal): Promise<LighthouseMetrics> {
     let chrome: chromeLauncher.LaunchedChrome | null = null;
     let auditError: unknown = null;
     let lhrRuntimeError: unknown = null;
@@ -417,7 +443,7 @@ export class LighthouseService {
       let metrics: LighthouseMetrics;
       try {
         metrics = await (async (): Promise<LighthouseMetrics> => {
-          const runnerResult = await this.runLighthouseWithTimeout(targetUrl, flags, config, chrome!);
+          const runnerResult = await this.runLighthouseWithTimeout(targetUrl, flags, config, chrome!, signal);
           auditDurationMs = Date.now() - auditStartedAt;
 
           if (!runnerResult || !runnerResult.lhr) {
@@ -551,16 +577,16 @@ export class LighthouseService {
     }
   }
 
-  public async runAudit(targetUrl: string, onDiagnostics?: LighthouseDiagnosticsCallback): Promise<LighthouseMetrics> {
+  public async runAudit(targetUrl: string, onDiagnostics?: LighthouseDiagnosticsCallback, signal?: AbortSignal): Promise<LighthouseMetrics> {
     const MAX_ATTEMPTS = 2;
     let lastError: any = null;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
-        return await this.runSingleAudit(targetUrl, attempt, MAX_ATTEMPTS, onDiagnostics);
+        return await this.runSingleAudit(targetUrl, attempt, MAX_ATTEMPTS, onDiagnostics, signal);
       } catch (error: any) {
         lastError = error;
-        if (isBrowserCleanupFailure(error) || (error instanceof ApiError && error.statusCode === 504)) {
+        if (isBrowserCleanupFailure(error) || (error instanceof ApiError && error.statusCode === 504) || error?.lighthouseAbort === true) {
           throw error;
         }
         const errMessage = sanitizeDiagnosticMessage(error?.message || 'Unknown Lighthouse error');

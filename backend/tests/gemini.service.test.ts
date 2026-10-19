@@ -47,6 +47,7 @@ async function run() {
     assert.strictEqual(primaryResult.overallVerdict, undefined, 'Gemini does not provide the combined overall score');
     assert.strictEqual(primary.calls(), 1, 'primary success should make one call');
     assert.strictEqual(primaryRequest.contents.length, 2, 'text prompt and screenshot remain multimodal input');
+    assert.ok(!primaryRequest.contents[0].text.includes('Lighthouse'), 'Gemini prompt receives no Lighthouse categories or metrics');
     assert.strictEqual(primaryRequest.contents[1].inlineData.mimeType, 'image/png');
     assert.ok(primaryRequest.config.responseSchema && primaryRequest.config.responseMimeType === 'application/json');
     assert.ok(primaryRequest.config.systemInstruction);
