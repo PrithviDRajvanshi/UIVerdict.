@@ -3,12 +3,13 @@ import { authService } from '../services/auth.service';
 import { registerSchema, loginSchema } from '../validators/auth.validator';
 import { ApiError } from '../errors/ApiError';
 
-const COOKIE_OPTIONS = {
+const AUTH_COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+export const getAuthCookieOptions = (nodeEnv = process.env.NODE_ENV) => ({
   httpOnly: true,
-  sameSite: 'lax' as const,
-  secure: process.env.NODE_ENV === 'production',
-  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-};
+  sameSite: nodeEnv === 'production' ? 'none' as const : 'lax' as const,
+  secure: nodeEnv === 'production',
+});
 
 export const register = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
@@ -20,7 +21,7 @@ export const register = async (req: Request, res: Response, next: NextFunction):
 
     const { user, token } = await authService.register(parseResult.data);
 
-    res.cookie('token', token, COOKIE_OPTIONS);
+    res.cookie('token', token, { ...getAuthCookieOptions(), maxAge: AUTH_COOKIE_MAX_AGE_MS });
     res.status(201).json({
       status: 'success',
       message: 'Account created successfully',
@@ -41,7 +42,7 @@ export const login = async (req: Request, res: Response, next: NextFunction): Pr
 
     const { user, token } = await authService.login(parseResult.data);
 
-    res.cookie('token', token, COOKIE_OPTIONS);
+    res.cookie('token', token, { ...getAuthCookieOptions(), maxAge: AUTH_COOKIE_MAX_AGE_MS });
     res.status(200).json({
       status: 'success',
       message: 'Authentication successful',
@@ -54,11 +55,7 @@ export const login = async (req: Request, res: Response, next: NextFunction): Pr
 
 export const logout = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    res.clearCookie('token', {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
-    });
+    res.clearCookie('token', getAuthCookieOptions());
     res.status(200).json({
       status: 'success',
       message: 'Logged out successfully',
