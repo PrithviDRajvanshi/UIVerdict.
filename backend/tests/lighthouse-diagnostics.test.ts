@@ -256,6 +256,38 @@ async function testMemorySafeAuditDoesNotRepeatTheSameCategories() {
   assert.deepStrictEqual(categoryRequests, [['accessibility', 'best-practices', 'seo']]);
 }
 
+async function testMemoryAbortWinsChromeConnectionClosedRace() {
+  const chrome = {
+    process: { pid: 702, exitCode: null, signalCode: null },
+    port: 24002,
+    kill() {},
+  } as any;
+  const controller = new AbortController();
+  let rejectAudit!: (error: Error) => void;
+  let resolveAuditStarted!: () => void;
+  const auditStarted = new Promise<void>((resolve) => { resolveAuditStarted = resolve; });
+  let launches = 0;
+  let cleanupCompleted = false;
+  controller.signal.addEventListener('abort', () => rejectAudit(new Error('Connection closed.')), { once: true });
+  const service = new LighthouseService({
+    launchChrome: async () => { launches++; return chrome; },
+    runLighthouse: async () => new Promise((_resolve, reject) => {
+      rejectAudit = reject;
+      resolveAuditStarted();
+    }),
+    killChromeProcessTree: async () => { cleanupCompleted = true; },
+    stopChrome: async () => {},
+  });
+  const audit = service.runAudit('https://example.test/', undefined, controller.signal, undefined,
+    ['accessibility', 'best-practices', 'seo']);
+  await auditStarted;
+  controller.abort('memory limit');
+  await assert.rejects(audit, (error: any) => error?.lighthouseAbort === true && /memory limit/.test(error.message),
+    'memory abort must be retained when Chrome closure rejects Lighthouse first');
+  assert.strictEqual(cleanupCompleted, true, 'abort is not propagated before Chrome cleanup finishes');
+  assert.strictEqual(launches, 1, 'the masked connection error must not trigger another Chrome launch');
+}
+
 async function run() {
   await testProcessGroupWait();
   await testCleanupFailurePropagation();
@@ -264,6 +296,7 @@ async function run() {
   await testAbortCleanupFailureIsMarked();
   await testMemoryAbortRetriesWithoutPerformance();
   await testMemorySafeAuditDoesNotRepeatTheSameCategories();
+  await testMemoryAbortWinsChromeConnectionClosedRace();
   const profileRoot = os.tmpdir();
   const profilesBefore = new Set((await fs.promises.readdir(profileRoot, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory() && entry.name.startsWith('lighthouse.'))

@@ -363,7 +363,20 @@ export class LighthouseService {
     });
 
     try {
-      return await Promise.race([audit, timeoutPromise, abortPromise]);
+      // Killing Chrome can make Lighthouse reject first with ConnectionClosedError.
+      // If the caller already aborted, wait for process cleanup and preserve the
+      // abort marker so runAudit does not mistake this for a retryable audit error.
+      const abortAwareAudit = audit.catch(async (error) => {
+        if (signal?.aborted) {
+          try {
+            await abortPromise;
+          } catch (abortError) {
+            throw abortError;
+          }
+        }
+        throw error;
+      });
+      return await Promise.race([abortAwareAudit, timeoutPromise, abortPromise]);
     } finally {
       if (timeout) clearTimeout(timeout);
       if (abortListener) signal?.removeEventListener('abort', abortListener);
@@ -447,7 +460,7 @@ export class LighthouseService {
         },
       };
 
-      console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Running audit...`);
+      console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Running audit with categories: ${onlyCategories.join(', ')}`);
       auditStartedAt = Date.now();
       let metrics: LighthouseMetrics;
       try {
