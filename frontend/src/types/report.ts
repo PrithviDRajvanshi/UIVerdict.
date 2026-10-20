@@ -18,7 +18,8 @@ export interface ReportData {
   latency: string;
   overallScore: number | null;
   verdictStatus: string;
-  aiStatus: 'AVAILABLE' | 'UNAVAILABLE';
+  mode: 'visual' | 'tech' | 'overall' | 'unknown';
+  aiStatus: 'AVAILABLE' | 'UNAVAILABLE' | 'NOT_REQUESTED';
   status: 'COMPLETED' | 'BLOCKED' | 'INCONCLUSIVE' | 'FAILED';
   visualDesignScore: number | null;
   validationReason: string | null;

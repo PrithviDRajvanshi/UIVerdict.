@@ -100,23 +100,15 @@ async function runAnalysisLifecycleTests() {
     const success = await service.analyzeUrl('https://example.com');
     assert.strictEqual(success.data.id, 'analysis-test-id');
     assert.deepStrictEqual(statuses, [AnalysisStatus.COMPLETED]);
-    assert.deepStrictEqual(stageEvents, ['playwright', 'gemini', 'lighthouse', 'persist']);
+    assert.deepStrictEqual(stageEvents, ['playwright', 'gemini', 'persist']);
     assert.strictEqual(cleaned, 1, 'temporary screenshot is cleaned after success');
 
     statuses.length = 0;
     cleaned = 0;
     geminiService.generateAnalysis = async () => { throw new Error('forced unit-test failure'); };
-    let persistedPartial = false;
-    postgresRepository.saveAnalysisResult = async (_id, input) => {
-      persistedPartial = !input.aiAnalysis && input.metrics === metrics;
-      statuses.push(AnalysisStatus.COMPLETED);
-      return {} as any;
-    };
-    const partial = await service.analyzeUrl('https://example.com/failure');
-    assert.strictEqual(partial.data.aiStatus, 'UNAVAILABLE');
-    assert.strictEqual(partial.data.aiAnalysis, null, 'partial response must not fabricate AI output');
-    assert.deepStrictEqual(statuses, [AnalysisStatus.COMPLETED]);
-    assert.strictEqual(persistedPartial, true, 'real Lighthouse metrics are persisted without AI data');
+    await assert.rejects(() => service.analyzeUrl('https://example.com/failure'),
+      (error: any) => error instanceof ApiError && error.statusCode === 503);
+    assert.deepStrictEqual(statuses, [AnalysisStatus.FAILED]);
     assert.strictEqual(cleaned, 1, 'temporary screenshot is cleaned after partial report');
 
     statuses.length = 0;
@@ -139,42 +131,12 @@ async function runAnalysisLifecycleTests() {
       stageEvents.push('lighthouse');
       throw new Error('Lighthouse navigation failed');
     };
-    const lighthousePartial = await service.analyzeUrl('https://example.com/lighthouse-failure');
-    assert.strictEqual(lighthousePartial.status, 'success', 'Lighthouse failure returns a successful partial report');
-    assert.strictEqual(lighthousePartial.data.partial, true);
-    assert.strictEqual(lighthousePartial.data.technicalUnavailable, true);
-    assert.strictEqual(lighthousePartial.data.technicalUnavailableReason, 'Lighthouse navigation failed');
-    assert.strictEqual(lighthousePartial.data.overallScore, aiAnalysis.visualDesignScore, 'visual score is used alone for Lighthouse-unavailable reports');
-    assert.strictEqual(lighthousePartial.data.metrics.performance, null);
-    assert.strictEqual(persistedMetrics.performance, null);
-    assert.deepStrictEqual(stageEvents, ['playwright', 'gemini', 'lighthouse', 'persist']);
-    assert.strictEqual(cleaned, 1, 'screenshot is deleted exactly once when Lighthouse fails');
-    const originalAnalyzeUrl = analysisService.analyzeUrl;
-    analysisService.analyzeUrl = async () => lighthousePartial;
-    let httpStatus = 0;
-    let httpBody: any;
-    const request: any = {
-      body: { url: 'https://example.com/lighthouse-failure' },
-      user: { id: 'test-user' },
-      once() { return this; },
-      removeListener() { return this; },
-    };
-    const response: any = {
-      destroyed: false,
-      writableEnded: false,
-      once() { return this; },
-      removeListener() { return this; },
-      status(code: number) { httpStatus = code; return this; },
-      json(body: unknown) { httpBody = body; return this; },
-    };
-    try {
-      await analyze(request, response, (error) => { throw error; });
-    } finally {
-      analysisService.analyzeUrl = originalAnalyzeUrl;
-    }
-    assert.strictEqual(httpStatus, 200, 'controller preserves HTTP 200 for a completed partial report');
-    assert.strictEqual(httpBody.data.partial, true);
-    assert.strictEqual(httpBody.data.technicalUnavailable, true);
+    await assert.rejects(() => service.analyzeUrl('https://example.com/lighthouse-failure', undefined, undefined, 'tech'),
+      (error: any) => error instanceof ApiError && error.statusCode === 503,
+      'a technical-only request fails when Lighthouse has no results');
+    assert.strictEqual(persistedMetrics, undefined, 'an unavailable technical section is not persisted as completed');
+    assert.deepStrictEqual(stageEvents, ['lighthouse']);
+    assert.strictEqual(cleaned, 0, 'technical mode creates no screenshot artifact');
 
     statuses.length = 0;
     cleaned = 0;
@@ -191,19 +153,20 @@ async function runAnalysisLifecycleTests() {
     lighthouseService.runAudit = async (_url, _diagnostics, auditSignal) => {
       abortAuditCalls += 1;
       stageEvents.push('lighthouse');
-      return new Promise((_resolve, reject) => {
-        auditSignal?.addEventListener('abort', () => reject(new Error('Lighthouse audit aborted: memory limit')), { once: true });
+      return new Promise((resolve) => {
+        auditSignal?.addEventListener('abort', () => resolve(metrics), { once: true });
       });
     };
     try {
-      const memoryPartial = await memoryGuardedService.analyzeUrl('https://example.com/memory-limit');
+      const memoryPartial = await memoryGuardedService.analyzeUrl('https://example.com/memory-limit', undefined, undefined, 'tech');
       assert.strictEqual(memoryPartial.status, 'success');
       assert.strictEqual(memoryPartial.data.partial, true);
       assert.strictEqual(memoryPartial.data.technicalUnavailableReason, 'memory limit');
-      assert.strictEqual(memoryPartial.data.overallScore, aiAnalysis.visualDesignScore);
-      assert.strictEqual(abortAuditCalls, 1, 'memory limit abort does not retry Lighthouse');
+      assert.strictEqual(memoryPartial.data.overallScore, null);
+      assert.strictEqual(memoryPartial.data.mode, 'tech');
+      assert.strictEqual(abortAuditCalls, 1, 'the analysis service delegates its one reduced-category retry to Lighthouse');
       assert.strictEqual(pollerStopped, 1, 'memory poller stops in finally');
-      assert.strictEqual(cleaned, 1, 'screenshot is removed before the memory-aborted Lighthouse stage');
+      assert.strictEqual(cleaned, 0, 'technical mode creates no screenshot artifact');
     } finally {
       if (previousMemoryLimit === undefined) delete process.env.LIGHTHOUSE_MEMORY_ABORT_BYTES;
       else process.env.LIGHTHOUSE_MEMORY_ABORT_BYTES = previousMemoryLimit;
@@ -267,14 +230,14 @@ async function runAnalysisLifecycleTests() {
       }, { once: true });
     });
     try {
-      await assert.rejects(() => memoryGuardedService.analyzeUrl('https://example.com/abort-cleanup-failure'), (error) => error === cleanupFailure,
+      await assert.rejects(() => memoryGuardedService.analyzeUrl('https://example.com/abort-cleanup-failure', undefined, undefined, 'tech'), (error) => error === cleanupFailure,
         'browser cleanup failure during memory abort remains fail-closed and is rethrown');
       assert.strictEqual(pollerStopped, 2, 'memory poller stops even when abort cleanup fails');
     } finally {
       if (previousCleanupMemoryLimit === undefined) delete process.env.LIGHTHOUSE_MEMORY_ABORT_BYTES;
       else process.env.LIGHTHOUSE_MEMORY_ABORT_BYTES = previousCleanupMemoryLimit;
     }
-    assert.strictEqual(cleaned, 1, 'screenshot is deleted before a browser cleanup failure propagates');
+    assert.strictEqual(cleaned, 0, 'technical mode creates no screenshot to clean up');
   } finally {
     postgresRepository.createAnalysisTransaction = original.createAnalysisTransaction;
     postgresRepository.saveAnalysisResult = original.saveAnalysisResult;

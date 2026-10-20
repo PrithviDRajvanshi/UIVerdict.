@@ -7,7 +7,8 @@ interface SavedReportResponse {
     id: string;
     url: string;
     createdAt: string;
-    aiStatus: 'AVAILABLE' | 'UNAVAILABLE';
+    mode?: ReportData['mode'];
+    aiStatus: ReportData['aiStatus'];
     status: ReportData['status'];
     visualDesignScore: number | null;
     validationReason: string | null;
@@ -45,6 +46,17 @@ export async function fetchReportById(id: string): Promise<ReportData> {
   const result: SavedReportResponse = await response.json();
   const saved = result.data;
   const cls = Number.parseFloat(saved.metrics.cumulativeLayoutShift);
+  const hasVisualScore = saved.visualDesignScore !== null;
+  const hasTechnicalScores = [saved.metrics.performance, saved.metrics.accessibility, saved.metrics.bestPractices, saved.metrics.seo]
+    .some((score) => score !== null) || [saved.metrics.firstContentfulPaint, saved.metrics.largestContentfulPaint,
+      saved.metrics.speedIndex, saved.metrics.totalBlockingTime, saved.metrics.cumulativeLayoutShift,
+      saved.metrics.timeToInteractive].some((metric) => metric !== null && metric !== '' && metric.toLowerCase() !== 'n/a');
+  const inferredMode: ReportData['mode'] = saved.mode ?? (
+    hasVisualScore && hasTechnicalScores ? 'overall'
+      : hasVisualScore ? 'visual'
+      : hasTechnicalScores ? 'tech'
+      : saved.overallScore !== null ? 'overall' : 'unknown'
+  );
 
   return {
     evaluationId: saved.id,
@@ -52,6 +64,7 @@ export async function fetchReportById(id: string): Promise<ReportData> {
     timestamp: new Date(saved.createdAt).toISOString(),
     latency: '—',
     overallScore: saved.overallScore,
+    mode: inferredMode,
     verdictStatus: saved.verdictLabel ?? 'OVERALL UNAVAILABLE',
     aiStatus: saved.aiStatus,
     status: saved.status,

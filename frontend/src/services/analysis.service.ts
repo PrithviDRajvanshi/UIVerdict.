@@ -26,9 +26,10 @@ export interface BackendAiAnalysis {
 export interface BackendAnalysisData {
   id: string;
   url: string;
+  mode: 'visual' | 'tech';
   metrics: BackendMetrics;
   aiAnalysis: BackendAiAnalysis | null;
-  aiStatus: 'AVAILABLE' | 'UNAVAILABLE';
+  aiStatus: 'AVAILABLE' | 'UNAVAILABLE' | 'NOT_REQUESTED';
   status: 'VALID' | 'BLOCKED' | 'INCONCLUSIVE';
   overallScore: number | null;
   verdictLabel: string | null;
@@ -45,7 +46,7 @@ export async function fetchAnalysisOverview(): Promise<AnalysisOverviewData> {
   return analysisMock as AnalysisOverviewData;
 }
 
-export async function analyzeWebsite(url: string, signal?: AbortSignal): Promise<BackendAnalysisData> {
+export async function analyzeWebsite(url: string, mode: 'visual' | 'tech' = 'visual', signal?: AbortSignal): Promise<BackendAnalysisData> {
   let formattedUrl = url.trim();
   if (!formattedUrl) {
     throw new Error('Please enter a valid website URL.');
@@ -68,7 +69,7 @@ export async function analyzeWebsite(url: string, signal?: AbortSignal): Promise
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ url: formattedUrl }),
+      body: JSON.stringify({ url: formattedUrl, mode }),
       credentials: 'include',
       signal,
     });

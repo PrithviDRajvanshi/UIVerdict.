@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useLocation } from 'react-router-dom';
 import { fetchReportById } from '../../services/report.service';
 import { ReportData } from '../../types/report';
 import { ReportHeader } from '../../components/report/ReportHeader';
@@ -12,6 +12,13 @@ import { getReportPresentation } from '../../services/report-presentation.js';
 
 export const ReportPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
+  const location = useLocation();
+  const queryMode = new URLSearchParams(location.search).get('mode');
+  const navigationMode = location.state?.mode === 'visual' || location.state?.mode === 'tech'
+    ? location.state.mode
+    : queryMode === 'visual' || queryMode === 'tech'
+      ? queryMode
+      : null;
   const [report, setReport] = useState<ReportData | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -32,7 +39,7 @@ export const ReportPage: React.FC = () => {
     fetchReportById(id)
       .then((data) => {
         if (isMounted) {
-          setReport(data);
+          setReport({ ...data, mode: navigationMode ?? data.mode });
           setLoading(false);
         }
       })
@@ -47,7 +54,7 @@ export const ReportPage: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, [id]);
+  }, [id, navigationMode]);
 
   if (loading) {
     return (
@@ -69,6 +76,7 @@ export const ReportPage: React.FC = () => {
   }
 
   const presentation = getReportPresentation(report.status, report.aiStatus);
+  const mode = navigationMode ?? report.mode;
   const hasLighthouseData = [report.metrics.performance, report.metrics.accessibility, report.metrics.bestPractices, report.metrics.seoStructure]
     .some((score) => score !== null) || [
       report.metrics.firstContentfulPaint,
@@ -79,6 +87,8 @@ export const ReportPage: React.FC = () => {
       report.metrics.timeToInteractive,
     ].some((metric) => typeof metric === 'string' && metric.trim() !== '' && metric.toLowerCase() !== 'n/a');
   const hasVisualScore = report.visualDesignScore !== null;
+  const showVisual = mode === 'visual' || mode === 'overall' || (mode === 'unknown' && hasVisualScore);
+  const showTechnical = mode === 'tech' || mode === 'overall' || (mode === 'unknown' && hasLighthouseData);
 
   return (
     <main className="max-w-container-max mx-auto px-margin-desktop py-stack-lg flex flex-col gap-stack-lg">
@@ -111,26 +121,29 @@ export const ReportPage: React.FC = () => {
         <div role="status" className="border border-red-800 bg-red-950/40 p-4 font-mono-data text-sm text-red-200">This analysis failed before a reliable report could be completed.</div>
       ) : null}
 
-      {report.status === 'COMPLETED' && (presentation.aiUnavailable || !hasLighthouseData) && (
+      {report.status === 'COMPLETED' && showVisual && presentation.aiUnavailable && (
         <div role="status" className="border border-amber-700 bg-amber-950/40 p-4 font-mono-data text-sm text-amber-200">
-          {!hasVisualScore && !hasLighthouseData
-            ? 'No visual score, Lighthouse scores, Web Vitals, or AI critique are available for this report.'
-            : !hasLighthouseData
-            ? `${hasVisualScore ? 'A visual score and visual critique are available' : 'No visual score is available'}${presentation.aiUnavailable ? ', but AI critique is unavailable' : ''}. Lighthouse scores and Web Vitals are unavailable${report.overallScore !== null ? '; the overall score uses visual evidence only' : ''}.`
-            : `${hasVisualScore ? 'A visual score is available' : 'No visual score is available'}, and Lighthouse scores and Web Vitals are available. AI critique is unavailable.`}
+          The visual critique is unavailable for this visual analysis.
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-12 gap-gutter bg-[#2a2a2a] p-gutter">
+      {report.status === 'COMPLETED' && showTechnical && !hasLighthouseData && (
+        <div role="status" className="border border-amber-700 bg-amber-950/40 p-4 font-mono-data text-sm text-amber-200">
+          Technical measurements are unavailable for this technical analysis.
+        </div>
+      )}
+
+      <div className={`grid grid-cols-1 ${showVisual ? 'md:grid-cols-12' : 'md:grid-cols-1'} gap-gutter bg-[#2a2a2a] p-gutter`}>
         <ScorePanel
           overallScore={report.overallScore}
           visualDesignScore={report.visualDesignScore}
           verdictStatus={report.verdictStatus}
           metrics={report.metrics}
+          mode={mode}
           isAuthenticated={isAuthenticated}
         />
 
-        <div className="md:col-span-8 flex flex-col gap-gutter bg-[#2a2a2a] relative">
+        {showVisual && <div className="md:col-span-8 flex flex-col gap-gutter bg-[#2a2a2a] relative">
           {report.status !== 'COMPLETED' ? (
             <div className="border border-[#2a2a2a] bg-[#151515] p-8 text-center font-mono-data text-sm text-[#bbbbbb]">
               No visual evaluation or technical scores are available for this target-page status.
@@ -144,7 +157,7 @@ export const ReportPage: React.FC = () => {
             <div className="border border-[#2a2a2a] bg-[#151515] p-8 text-center font-mono-data text-sm text-[#bbbbbb]">
               Qualitative critique and recommendations were not generated because Gemini was unavailable.
             </div>
-          ) : (
+          ) : report.aiStatus === 'NOT_REQUESTED' ? null : (
             <div className="relative border border-[#2a2a2a] bg-[#151515] p-8 flex flex-col items-center justify-center text-center min-h-[380px] overflow-hidden">
               {/* Blurred background preview */}
               <div className="absolute inset-0 opacity-15 blur-sm select-none pointer-events-none p-6 text-left">
@@ -175,21 +188,21 @@ export const ReportPage: React.FC = () => {
               </div>
             </div>
           )}
-        </div>
+        </div>}
       </div>
 
-      {isAuthenticated && report.status === 'COMPLETED' ? (
-        <StatisticsChart metrics={report.metrics} />
-      ) : report.status !== 'COMPLETED' ? (
-        <div className="border border-[#2a2a2a] bg-[#151515] p-5 font-mono-data text-sm text-[#888888]">
-          Lighthouse telemetry is unavailable because the intended target page was not validated.
-        </div>
-      ) : (
+      {showTechnical && isAuthenticated && report.status === 'COMPLETED' && <StatisticsChart metrics={report.metrics} />}
+      {showTechnical && !isAuthenticated && report.status === 'COMPLETED' && (
         <div className="border border-[#2a2a2a] bg-[#151515] p-8 flex flex-col items-center justify-center text-center min-h-[220px]">
           <span className="material-symbols-outlined text-3xl text-[#888888] mb-2">analytics</span>
           <p className="font-mono-data text-mono-data text-[#888888]">
             Detailed telemetry graphs locked. Authenticate to view full forensic statistics.
           </p>
+        </div>
+      )}
+      {showTechnical && report.status !== 'COMPLETED' && (
+        <div className="border border-[#2a2a2a] bg-[#151515] p-5 font-mono-data text-sm text-[#888888]">
+          Lighthouse telemetry is unavailable because the intended target page was not validated.
         </div>
       )}
     </main>

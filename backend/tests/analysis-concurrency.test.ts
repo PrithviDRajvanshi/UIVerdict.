@@ -231,14 +231,12 @@ async function testAnalysisPipelineSerialization(): Promise<void> {
     const [firstResponse] = await Promise.all([first, second]);
     assert.strictEqual(peakPipelines, 1, 'screenshot, Lighthouse, and Gemini analysis are serialized as one pipeline');
     assert.deepStrictEqual(events.slice(0, 14), [
-      'playwright:start', 'playwright:browser-closed', 'gemini:start', 'screenshot:removed',
-      'lighthouse:start', 'lighthouse:chrome-closed', 'persist',
-      'playwright:start', 'playwright:browser-closed', 'gemini:start', 'screenshot:removed',
-      'lighthouse:start', 'lighthouse:chrome-closed', 'persist',
-    ], 'browser cleanup completes before the next stage and screenshot cleanup follows Gemini');
+      'playwright:start', 'playwright:browser-closed', 'gemini:start', 'screenshot:removed', 'persist',
+      'playwright:start', 'playwright:browser-closed', 'gemini:start', 'screenshot:removed', 'persist',
+    ], 'visual mode runs only Playwright and Gemini, then deletes its screenshot before persistence');
     assert.strictEqual(firstResponse.data.aiStatus, 'AVAILABLE');
     assert.deepStrictEqual(Object.keys(firstResponse.data).sort(), [
-      'aiAnalysis', 'aiStatus', 'id', 'metrics', 'overallScore', 'partial', 'targetValidationStatus', 'technicalUnavailable',
+      'aiAnalysis', 'aiStatus', 'id', 'metrics', 'mode', 'overallScore', 'partial', 'targetValidationStatus', 'technicalUnavailable',
       'technicalUnavailableReason', 'url', 'verdictLabel', 'visualDesignScore',
     ], 'successful response fields remain unchanged');
     assert.strictEqual(persistedInput.screenshotArtifactName, 'test-2.png');
@@ -253,23 +251,21 @@ async function testAnalysisPipelineSerialization(): Promise<void> {
 
     const lighthouseEventsStart = events.length;
     screenshotCleanupFailure = new Error('forced screenshot cleanup failure');
-    const lighthousePartial = await service.analyzeUrl('https://example.com/lighthouse-fail');
+    await assert.rejects(
+      service.analyzeUrl('https://example.com/lighthouse-fail', undefined, undefined, 'tech'),
+      (error: any) => error.statusCode === 503,
+      'technical mode fails when its Lighthouse section is unavailable',
+    );
     screenshotCleanupFailure = null;
-    assert.strictEqual(lighthousePartial.data.technicalUnavailable, true);
-    assert.strictEqual(lighthousePartial.data.partial, true);
-    assert.deepStrictEqual(events.slice(lighthouseEventsStart), [
-      'playwright:start', 'playwright:browser-closed', 'gemini:start', 'screenshot:removed',
-      'lighthouse:start', 'lighthouse:chrome-closed', 'persist',
-    ], 'Lighthouse failure creates a partial report after Gemini and screenshot cleanup');
+    assert.deepStrictEqual(events.slice(lighthouseEventsStart), ['lighthouse:start', 'lighthouse:chrome-closed'],
+      'technical mode runs Lighthouse only and does not persist an unavailable section');
 
     screenshotCleanupFailure = new Error('forced screenshot cleanup failure after Gemini');
-    const geminiFallback = await service.analyzeUrl('https://example.com/gemini-fail');
+    await assert.rejects(service.analyzeUrl('https://example.com/gemini-fail'), (error: any) => error.statusCode === 503,
+      'visual mode fails when its Gemini section is unavailable');
     screenshotCleanupFailure = null;
-    assert.strictEqual(geminiFallback.data.aiStatus, 'UNAVAILABLE', 'Gemini keeps its existing Lighthouse-only fallback');
-    assert.deepStrictEqual(events.slice(-7), [
-      'playwright:start', 'playwright:browser-closed', 'gemini:start', 'screenshot:removed',
-      'lighthouse:start', 'lighthouse:chrome-closed', 'persist',
-    ], 'Gemini failure attempts screenshot cleanup before persisting the fallback report');
+    assert.deepStrictEqual(events.slice(-3), ['playwright:browser-closed', 'gemini:start', 'screenshot:removed'],
+      'Gemini failure still removes the screenshot and does not start Lighthouse');
 
     const client = new AbortController();
     const disconnected = service.analyzeUrl('https://example.com/disconnect', undefined, client.signal);

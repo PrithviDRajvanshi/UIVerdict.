@@ -8,12 +8,16 @@ interface Stage {
   threshold: number; // Progress percentage when stage begins
 }
 
-const STAGES: Stage[] = [
+const VISUAL_STAGES: Stage[] = [
   { id: '1', label: 'Validating Target URL', threshold: 5 },
-  { id: '2', label: 'Capturing High-Res Screenshot', threshold: 20 },
-  { id: '3', label: 'Auditing Performance & Accessibility', threshold: 50 },
-  { id: '4', label: 'Qualitative UI/UX Evaluation', threshold: 75 },
-  { id: '5', label: 'Saving Report & Finalizing Verdict', threshold: 95 },
+  { id: '2', label: 'Capturing Screenshot', threshold: 25 },
+  { id: '3', label: 'Visual Gemini Assessment', threshold: 65 },
+  { id: '4', label: 'Saving Visual Report', threshold: 95 },
+];
+const TECH_STAGES: Stage[] = [
+  { id: '1', label: 'Validating Target URL', threshold: 5 },
+  { id: '2', label: 'Running Lighthouse Audit', threshold: 70 },
+  { id: '3', label: 'Saving Technical Report', threshold: 95 },
 ];
 
 export const AnalysisPage: React.FC = () => {
@@ -22,6 +26,11 @@ export const AnalysisPage: React.FC = () => {
   const [searchParams] = useSearchParams();
 
   const initialUrl = location.state?.url || searchParams.get('url') || '';
+  const stateMode = location.state?.mode;
+  const mode: 'visual' | 'tech' = stateMode === 'visual' || stateMode === 'tech'
+    ? stateMode
+    : searchParams.get('mode') === 'tech' ? 'tech' : 'visual';
+  const stages = mode === 'tech' ? TECH_STAGES : VISUAL_STAGES;
   const [inputUrl, setInputUrl] = useState(initialUrl);
   const [urlToAnalyze, setUrlToAnalyze] = useState(initialUrl);
 
@@ -54,18 +63,19 @@ export const AnalysisPage: React.FC = () => {
     if (!urlToAnalyze) return;
 
     // Prevent duplicate requests for the same URL
-    if (hasFiredRef.current === urlToAnalyze) {
+    const requestKey = `${mode}:${urlToAnalyze}`;
+    if (hasFiredRef.current === requestKey) {
       return;
     }
 
-    hasFiredRef.current = urlToAnalyze;
+    hasFiredRef.current = requestKey;
 
     console.log('[Analysis UI] Starting request for URL:', urlToAnalyze);
     setLoading(true);
     setError(null);
     setProgress(5);
 
-    analyzeWebsite(urlToAnalyze)
+    analyzeWebsite(urlToAnalyze, mode)
       .then((data) => {
         console.log('[Analysis UI] Analysis persisted with ID:', data.id);
 
@@ -75,7 +85,7 @@ export const AnalysisPage: React.FC = () => {
         hasFiredRef.current = null;
 
         console.log('[Analysis UI] Navigating to saved report:', data.id);
-        navigate(`/report/${data.id}`);
+        navigate(`/report/${data.id}?mode=${data.mode}`, { state: { mode: data.mode } });
       })
       .catch((err) => {
         console.error('[Analysis UI] Request failed:', err);
@@ -84,7 +94,7 @@ export const AnalysisPage: React.FC = () => {
         setLoading(false);
         setError(err?.message || 'Unable to analyze this website right now. Please try again.');
       });
-  }, [urlToAnalyze, navigate]);
+  }, [urlToAnalyze, mode, navigate]);
 
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -187,9 +197,9 @@ export const AnalysisPage: React.FC = () => {
 
             {/* Live Analysis Progress Stages */}
             <div className="flex flex-col gap-3 mt-2">
-              {STAGES.map((stage, idx) => {
-                const isCompleted = idx < STAGES.length - 1 ? progress >= STAGES[idx + 1].threshold : progress === 100;
-                const isCurrent = !isCompleted && (idx === 0 || progress >= STAGES[idx].threshold);
+              {stages.map((stage, idx) => {
+                const isCompleted = idx < stages.length - 1 ? progress >= stages[idx + 1].threshold : progress === 100;
+                const isCurrent = !isCompleted && (idx === 0 || progress >= stage.threshold);
 
                 return (
                   <div

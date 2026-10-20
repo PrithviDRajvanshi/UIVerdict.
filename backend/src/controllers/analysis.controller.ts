@@ -13,8 +13,9 @@ export const analyze = async (req: Request, res: Response, next: NextFunction): 
   res.once('close', abortForDisconnectedResponse);
   try {
     const { url } = req.body;
+    const mode = req.body.mode ?? 'visual';
     const userId = req.user?.id;
-    const result = await analysisService.analyzeUrl(url, userId, abortController.signal);
+    const result = await analysisService.analyzeUrl(url, userId, abortController.signal, mode);
     if (res.destroyed) return;
     if (!userId) {
       const analysisId = result.data.id;

@@ -1,8 +1,12 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { DEFAULT_ANALYSIS_MODE, OVERALL_MODE_ENABLED, OVERALL_MODE_TOOLTIP } from '../../services/analysis-mode.js';
+
+export type SelectedAnalysisMode = 'visual' | 'tech';
 
 export const UrlSearchForm: React.FC = () => {
   const [url, setUrl] = useState('');
+  const [mode, setMode] = useState<SelectedAnalysisMode>(DEFAULT_ANALYSIS_MODE);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
 
@@ -28,11 +32,35 @@ export const UrlSearchForm: React.FC = () => {
       return;
     }
 
-    navigate('/analysis', { state: { url: validUrl } });
+    const params = new URLSearchParams({ url: validUrl, mode });
+    navigate(`/analysis?${params.toString()}`, { state: { url: validUrl, mode } });
   };
 
   return (
     <div className="w-full max-w-2xl mt-8 relative">
+      <div role="group" aria-label="Analysis mode" className="flex items-center justify-center gap-2 mb-3 font-mono-data text-xs">
+        <button type="button" aria-pressed={mode === 'visual'} onClick={() => setMode('visual')}
+          className={`px-4 py-2 border ${mode === 'visual' ? 'border-primary text-primary' : 'border-brand-border text-[#888888]'}`}>
+          VISUAL
+        </button>
+        <button type="button" aria-pressed={mode === 'tech'} onClick={() => setMode('tech')}
+          className={`px-4 py-2 border ${mode === 'tech' ? 'border-primary text-primary' : 'border-brand-border text-[#888888]'}`}>
+          TECHNICAL
+        </button>
+        <div className="flex items-center gap-1">
+          <button type="button" disabled={!OVERALL_MODE_ENABLED} aria-disabled={!OVERALL_MODE_ENABLED} title={OVERALL_MODE_TOOLTIP}
+            className="px-4 py-2 border border-[#333333] text-[#555555] opacity-50 cursor-not-allowed">
+            OVERALL
+          </button>
+          <details className="relative">
+            <summary aria-label="Why overall analysis is unavailable" title="About overall analysis"
+              className="list-none cursor-pointer w-6 h-6 rounded-full border border-[#666666] text-[#aaaaaa] flex items-center justify-center">i</summary>
+            <div role="note" className="absolute z-20 right-0 top-8 w-64 p-3 text-left normal-case bg-[#101010] border border-brand-border text-[#cccccc] shadow-xl">
+              {OVERALL_MODE_TOOLTIP}
+            </div>
+          </details>
+        </div>
+      </div>
       <form onSubmit={handleSubmit} className="flex flex-col md:flex-row w-full bg-[#101010] border border-brand-border shadow-2xl">
         <div className="flex-grow relative flex items-center border-b md:border-b-0 md:border-r border-brand-border focus-within:border-primary transition-colors">
           <span aria-hidden="true" className="material-symbols-outlined text-outline ml-4">
