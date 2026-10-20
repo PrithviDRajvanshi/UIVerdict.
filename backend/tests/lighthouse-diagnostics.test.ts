@@ -226,6 +226,36 @@ async function testMemoryAbortRetriesWithoutPerformance() {
   assert.strictEqual(metrics.seo, 73);
 }
 
+async function testMemorySafeAuditDoesNotRepeatTheSameCategories() {
+  const chrome = () => ({
+    process: { pid: 701, exitCode: null, signalCode: null },
+    port: 24001,
+    kill() {},
+  } as any);
+  let launches = 0;
+  let resolveAuditStarted!: () => void;
+  const auditStarted = new Promise<void>((resolve) => { resolveAuditStarted = resolve; });
+  const categoryRequests: string[][] = [];
+  const service = new LighthouseService({
+    launchChrome: async () => { launches++; return chrome(); },
+    runLighthouse: async (_url, flags) => {
+      categoryRequests.push([...(flags.onlyCategories as string[])]);
+      resolveAuditStarted();
+      return new Promise(() => {});
+    },
+    killChromeProcessTree: async () => {},
+    stopChrome: async () => {},
+  });
+  const memoryAbort = new AbortController();
+  const audit = service.runAudit('https://example.test/', undefined, memoryAbort.signal, undefined,
+    ['accessibility', 'best-practices', 'seo']);
+  await auditStarted;
+  memoryAbort.abort('memory limit');
+  await assert.rejects(audit, /Lighthouse audit aborted: memory limit/);
+  assert.strictEqual(launches, 1, 'an already reduced audit must not launch a duplicate retry with identical categories');
+  assert.deepStrictEqual(categoryRequests, [['accessibility', 'best-practices', 'seo']]);
+}
+
 async function run() {
   await testProcessGroupWait();
   await testCleanupFailurePropagation();
@@ -233,6 +263,7 @@ async function run() {
   await testAuditTimeoutKillsChromeAndUsesResourceSettings();
   await testAbortCleanupFailureIsMarked();
   await testMemoryAbortRetriesWithoutPerformance();
+  await testMemorySafeAuditDoesNotRepeatTheSameCategories();
   const profileRoot = os.tmpdir();
   const profilesBefore = new Set((await fs.promises.readdir(profileRoot, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory() && entry.name.startsWith('lighthouse.'))

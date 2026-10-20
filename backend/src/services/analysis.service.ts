@@ -1,5 +1,5 @@
 import { playwrightService, ScreenshotResult } from './playwright.service';
-import { lighthouseService, LighthouseMetrics } from './lighthouse.service';
+import { LIGHTHOUSE_MEMORY_SAFE_CATEGORIES, lighthouseService, LighthouseMetrics } from './lighthouse.service';
 import { geminiService } from './gemini.service';
 import { AiAnalysis } from '../validators/aiAnalysis.validator';
 import { postgresRepository } from '../repositories/postgres/postgres.repository';
@@ -207,7 +207,8 @@ export class AnalysisService {
       })();
       try {
         metrics = await lighthouseService.runAudit(url, (diagnostics) =>
-          postgresRepository.updateLighthouseDiagnostics(analysis.id, diagnostics).then(() => undefined), auditController.signal, signal);
+          postgresRepository.updateLighthouseDiagnostics(analysis.id, diagnostics).then(() => undefined), auditController.signal, signal,
+          LIGHTHOUSE_MEMORY_SAFE_CATEGORIES);
         console.log(`[AnalysisService] Lighthouse audit completed for URL: ${sanitizeDiagnosticUrl(url)} (Performance: ${metrics.performance}, Accessibility: ${metrics.accessibility})`);
       } catch (lighthouseError: any) {
         if (isBrowserCleanupFailure(lighthouseError) || signal?.aborted) throw lighthouseError;
@@ -255,7 +256,7 @@ export class AnalysisService {
         ...(screenshotData ? { screenshotArtifactName: screenshotData.filename, screenshotSha256: screenshotData.sha256 } : {}),
       });
       const overallScore = null;
-      const partial = mode === 'tech' && (technicalUnavailable || [metrics.performance, metrics.accessibility, metrics.bestPractices, metrics.seo].some((score) => score === null));
+      const partial = mode === 'tech' && (technicalUnavailable || [metrics.accessibility, metrics.bestPractices, metrics.seo].some((score) => score === null));
       console.log(`[AnalysisService] PostgreSQL persistence complete. Analysis status marked as COMPLETED.`);
 
       // 6. Final response construction and return

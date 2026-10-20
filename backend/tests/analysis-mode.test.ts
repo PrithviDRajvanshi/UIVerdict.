@@ -69,7 +69,12 @@ async function run() {
     playwrightService.captureScreenshot = async () => { events.push('playwright'); return screenshot; };
     playwrightService.removeScreenshot = async () => { events.push('screenshot_cleanup'); };
     geminiService.generateAnalysis = async () => { events.push('gemini'); return visualResult; };
-    lighthouseService.runAudit = async () => { events.push('lighthouse'); return technicalMetrics; };
+    lighthouseService.runAudit = async (_url, _diagnostics, _signal, _retrySignal, categories) => {
+      events.push('lighthouse');
+      assert.deepStrictEqual(categories, ['accessibility', 'best-practices', 'seo'], 'technical mode skips Performance to reduce Lighthouse memory');
+      return { ...technicalMetrics, performance: null, firstContentfulPaint: null, largestContentfulPaint: null,
+        speedIndex: null, totalBlockingTime: null, cumulativeLayoutShift: null, timeToInteractive: null };
+    };
 
     const service = new AnalysisService({ pollIntervalMs: 60_000, readAnonBytes: async () => null });
     const visual = await service.analyzeUrl(validUrl, undefined, undefined, 'visual');
@@ -88,7 +93,8 @@ async function run() {
     assert.strictEqual(tech.data.aiStatus, 'NOT_REQUESTED');
     assert.strictEqual(tech.data.aiAnalysis, null);
     assert.strictEqual(tech.data.visualDesignScore, null);
-    assert.strictEqual(tech.data.metrics.performance, 80);
+    assert.strictEqual(tech.data.metrics.performance, null);
+    assert.strictEqual(tech.data.partial, false, 'a complete result for the requested memory-safe categories is not partial');
     assert.strictEqual(tech.data.overallScore, null);
     assert.strictEqual(saved[1].overallScore, null);
     assert.strictEqual(Object.hasOwn(saved[1], 'aiAnalysis'), false);
