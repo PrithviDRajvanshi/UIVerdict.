@@ -67,7 +67,8 @@ export const ScorePanel: React.FC<ScorePanelProps> = ({
             <div className="flex flex-col gap-0.5 pb-1">
               <span className="font-mono-data text-xs text-[#80DEEA] uppercase font-bold tracking-wider">Technical Audit (Lighthouse)</span>
               <span className="font-mono-data text-[10px] text-[#777777]">
-                {hasLighthouseScores ? 'Lighthouse category scores' : hasWebVitals ? 'Web Vitals are available; category scores are unavailable' : 'Technical measurements are unavailable'}
+                {mode === 'tech' ? 'Accessibility, best-practices and SEO; Performance is skipped to conserve memory'
+                  : hasLighthouseScores ? 'Lighthouse category scores' : hasWebVitals ? 'Web Vitals are available; category scores are unavailable' : 'Technical measurements are unavailable'}
               </span>
             </div>
             {([

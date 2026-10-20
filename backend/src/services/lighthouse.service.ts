@@ -33,7 +33,7 @@ export type LighthouseDiagnosticsCallback = (diagnostics: LighthouseDiagnosticMe
 
 const LIGHTHOUSE_AUDIT_TIMEOUT_MS = 120_000;
 const LIGHTHOUSE_CATEGORIES = ['performance', 'accessibility', 'best-practices', 'seo'];
-const MEMORY_RETRY_CATEGORIES = ['accessibility', 'best-practices', 'seo'];
+export const LIGHTHOUSE_MEMORY_SAFE_CATEGORIES = ['accessibility', 'best-practices', 'seo'];
 
 async function logCgroupMemorySnapshot(stage: 'before_launch' | 'after_audit' | 'after_cleanup', attempt: number): Promise<void> {
   try {
@@ -591,13 +591,14 @@ export class LighthouseService {
     onDiagnostics?: LighthouseDiagnosticsCallback,
     signal?: AbortSignal,
     retrySignal?: AbortSignal,
+    initialCategories: string[] = LIGHTHOUSE_CATEGORIES,
   ): Promise<LighthouseMetrics> {
     const MAX_ATTEMPTS = 2;
     let lastError: any = null;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
-        return await this.runSingleAudit(targetUrl, attempt, MAX_ATTEMPTS, onDiagnostics, signal);
+        return await this.runSingleAudit(targetUrl, attempt, MAX_ATTEMPTS, onDiagnostics, signal, initialCategories);
       } catch (error: any) {
         lastError = error;
         if (isBrowserCleanupFailure(error) || (error instanceof ApiError && error.statusCode === 504)) {
@@ -605,8 +606,9 @@ export class LighthouseService {
         }
         if (error?.lighthouseAbort === true) {
           if (/memory limit/i.test(String(error.message || ''))) {
+            if (!initialCategories.includes('performance')) throw error;
             console.warn('[Lighthouse] Retrying once without the performance category after a memory abort');
-            return this.runSingleAudit(targetUrl, 1, 1, onDiagnostics, retrySignal, MEMORY_RETRY_CATEGORIES);
+            return this.runSingleAudit(targetUrl, 1, 1, onDiagnostics, retrySignal, LIGHTHOUSE_MEMORY_SAFE_CATEGORIES);
           }
           throw error;
         }
