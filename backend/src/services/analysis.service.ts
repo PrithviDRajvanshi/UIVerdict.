@@ -1,6 +1,5 @@
-import { playwrightService, ScreenshotResult } from './playwright.service';
-import { LIGHTHOUSE_MEMORY_SAFE_CATEGORIES, lighthouseService, LighthouseMetrics } from './lighthouse.service';
-import { geminiService } from './gemini.service';
+import type { ScreenshotResult } from './playwright.service';
+import type { LighthouseMetrics } from './lighthouse.service';
 import { AiAnalysis } from '../validators/aiAnalysis.validator';
 import { postgresRepository } from '../repositories/postgres/postgres.repository';
 import { AnalysisStatus } from '@prisma/client';
@@ -119,6 +118,8 @@ export class AnalysisService {
 
     try {
       if (mode === 'visual') {
+      const { playwrightService } = await import('./playwright.service');
+      const { geminiService } = await import('./gemini.service');
       try {
         // Playwright resolves only after its browser cleanup completes.
         if (signal?.aborted) throw new Error('Analysis request was cancelled');
@@ -154,6 +155,7 @@ export class AnalysisService {
       if (mode === 'visual') {
         metrics = unavailableLighthouseMetrics();
       } else {
+      const { LIGHTHOUSE_MEMORY_SAFE_CATEGORIES, lighthouseService } = await import('./lighthouse.service');
       if (signal?.aborted) throw new Error('Analysis request was cancelled');
 
       // Lighthouse owns its Chrome process. The monitor aborts through LighthouseService,
