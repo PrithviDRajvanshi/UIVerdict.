@@ -20,10 +20,10 @@ type MemoryAnonReader = () => Promise<number | null>;
 async function readCgroupAnonBytes(): Promise<number | null> {
   try {
     const stat = await fs.readFile('/sys/fs/cgroup/memory.stat', 'utf8');
-    const anonLine = stat.split(/\r?\n/).find((line) => line.startsWith('anon '));
-    if (!anonLine) return null;
-    const bytes = Number(anonLine.trim().split(/\s+/)[1]);
-    return Number.isFinite(bytes) ? bytes : null;
+    const line = stat.split(/\r?\n/).find((entry) => entry.startsWith('anon '));
+    if (!line) return null;
+    const value = Number(line.trim().split(/\s+/)[1]);
+    return Number.isFinite(value) ? value : null;
   } catch {
     return null;
   }
@@ -158,59 +158,29 @@ export class AnalysisService {
       const { LIGHTHOUSE_MEMORY_SAFE_CATEGORIES, lighthouseService } = await import('./lighthouse.service');
       if (signal?.aborted) throw new Error('Analysis request was cancelled');
 
-      // Lighthouse owns its Chrome process. The monitor aborts through LighthouseService,
-      // which kills and waits for the process tree before this stage can resolve.
-      const auditController = new AbortController();
-      let pollerStopped = false;
-      let pollTimer: NodeJS.Timeout | undefined;
-      let wakePoller: (() => void) | undefined;
+      // Lighthouse owns the monitor and creates a fresh controller/poller per Chrome attempt.
       let memoryAbortReason: string | null = null;
-      const thresholdBytes = lighthouseMemoryThresholdBytes();
-      const externalAbort = () => auditController.abort(signal?.reason ?? 'request cancelled');
-      if (signal?.aborted) externalAbort();
-      else signal?.addEventListener('abort', externalAbort, { once: true });
-      const pollIntervalMs = this.memoryMonitor.pollIntervalMs ?? 1000;
-      const poller = (async () => {
-        while (!pollerStopped) {
-          await new Promise<void>((resolve) => {
-            let settled = false;
-            const wake = () => {
-              if (settled) return;
-              settled = true;
-              wakePoller = undefined;
-              resolve();
-            };
-            wakePoller = wake;
-            pollTimer = setTimeout(wake, pollIntervalMs);
-          });
-          if (pollerStopped) return;
-          let anonBytes: number | null = null;
-          try {
-            anonBytes = await (this.memoryMonitor.readAnonBytes ?? readCgroupAnonBytes)();
-          } catch {
-            // Memory monitoring is best-effort; unreadable cgroup data is skipped silently.
-          }
-          if (pollerStopped) return;
-          if (anonBytes !== null && anonBytes > thresholdBytes) {
-            memoryAbortReason = 'memory limit';
-            try {
-              console.warn('[AnalysisService] Lighthouse memory limit reached; aborting Chrome audit:', {
-                analysisId,
-                anonBytes,
-                thresholdBytes,
-              });
-            } catch {
-              // Logging must not prevent the memory abort.
-            }
-            auditController.abort(memoryAbortReason);
-            return;
-          }
-        }
-      })();
       try {
         metrics = await lighthouseService.runAudit(url, (diagnostics) =>
-          postgresRepository.updateLighthouseDiagnostics(analysis.id, diagnostics).then(() => undefined), auditController.signal, signal,
-          LIGHTHOUSE_MEMORY_SAFE_CATEGORIES);
+          postgresRepository.updateLighthouseDiagnostics(analysis.id, diagnostics).then(() => undefined), signal, undefined,
+          LIGHTHOUSE_MEMORY_SAFE_CATEGORIES, {
+            readAnonBytes: this.memoryMonitor.readAnonBytes ?? readCgroupAnonBytes,
+            thresholdBytes: lighthouseMemoryThresholdBytes(),
+            pollIntervalMs: this.memoryMonitor.pollIntervalMs,
+            onAbort: (anonBytes, thresholdBytes) => {
+              memoryAbortReason = 'memory limit';
+              try {
+                console.warn('[AnalysisService] Lighthouse memory limit reached; aborting Chrome audit:', {
+                  analysisId,
+                  anonBytes,
+                  thresholdBytes,
+                });
+              } catch {
+                // Logging must not prevent the memory abort.
+              }
+            },
+            onStop: this.memoryMonitor.onStop,
+          });
         console.log(`[AnalysisService] Lighthouse audit completed for URL: ${sanitizeDiagnosticUrl(url)} (Performance: ${metrics.performance}, Accessibility: ${metrics.accessibility})`);
       } catch (lighthouseError: any) {
         if (isBrowserCleanupFailure(lighthouseError) || signal?.aborted) throw lighthouseError;
@@ -221,17 +191,6 @@ export class AnalysisService {
           analysisId,
           reason: technicalUnavailableReason,
         });
-      } finally {
-        pollerStopped = true;
-        if (pollTimer) clearTimeout(pollTimer);
-        wakePoller?.();
-        signal?.removeEventListener('abort', externalAbort);
-        await poller;
-        try {
-          this.memoryMonitor.onStop?.();
-        } catch {
-          // The monitor hook must not mask the Lighthouse result or failure.
-        }
       }
       if (memoryAbortReason) {
         technicalUnavailable = true;

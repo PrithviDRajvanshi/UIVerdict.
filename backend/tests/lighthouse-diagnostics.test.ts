@@ -4,7 +4,7 @@ import http from 'http';
 import os from 'os';
 import path from 'path';
 import { LighthouseDiagnosticMetadata } from '../src/services/browser-diagnostics';
-import { LighthouseService, stopChromeAndWait, waitForLinuxProcessGroupExit } from '../src/services/lighthouse.service';
+import { LighthouseService, stopChromeAndWait, waitForChromeDevTools, waitForLinuxProcessGroupExit } from '../src/services/lighthouse.service';
 import { AnalysisConcurrencyQueue, isBrowserCleanupFailure } from '../src/services/analysis-concurrency';
 import { ApiError } from '../src/errors/ApiError';
 
@@ -53,6 +53,7 @@ async function testCleanupFailurePropagation() {
   } as any;
   const service = new LighthouseService({
     launchChrome: async () => fakeChrome,
+    waitForChromeReady: async () => {},
     runLighthouse: async () => ({
       lhr: {
         categories: {},
@@ -117,6 +118,7 @@ async function testAuditTimeoutKillsChromeAndUsesResourceSettings() {
   let lighthouseCalls = 0;
   const service = new LighthouseService({
     launchChrome: async (options: any) => { launchOptions = options; return chrome; },
+    waitForChromeReady: async () => {},
     runLighthouse: async (_url, flags, config) => {
       lighthouseCalls++;
       lighthouseFlags = flags;
@@ -157,6 +159,7 @@ async function testAbortCleanupFailureIsMarked() {
   let killTreeCalls = 0;
   const service = new LighthouseService({
     launchChrome: async () => chrome,
+    waitForChromeReady: async () => {},
     runLighthouse: async () => {
       resolveAuditStarted();
       return new Promise(() => {});
@@ -185,6 +188,7 @@ async function testMemoryAbortRetriesWithoutPerformance() {
   const firstAuditStarted = new Promise<void>((resolve) => { resolveFirstAudit = resolve; });
   const service = new LighthouseService({
     launchChrome: async () => { launches++; return chrome(); },
+    waitForChromeReady: async () => {},
     runLighthouse: async (_url, flags) => {
       categoryRequests.push([...(flags.onlyCategories as string[])]);
       if (categoryRequests.length === 1) {
@@ -238,6 +242,7 @@ async function testMemorySafeAuditDoesNotRepeatTheSameCategories() {
   const categoryRequests: string[][] = [];
   const service = new LighthouseService({
     launchChrome: async () => { launches++; return chrome(); },
+    waitForChromeReady: async () => {},
     runLighthouse: async (_url, flags) => {
       categoryRequests.push([...(flags.onlyCategories as string[])]);
       resolveAuditStarted();
@@ -271,6 +276,7 @@ async function testMemoryAbortWinsChromeConnectionClosedRace() {
   controller.signal.addEventListener('abort', () => rejectAudit(new Error('Connection closed.')), { once: true });
   const service = new LighthouseService({
     launchChrome: async () => { launches++; return chrome; },
+    waitForChromeReady: async () => {},
     runLighthouse: async () => new Promise((_resolve, reject) => {
       rejectAudit = reject;
       resolveAuditStarted();
@@ -288,6 +294,119 @@ async function testMemoryAbortWinsChromeConnectionClosedRace() {
   assert.strictEqual(launches, 1, 'the masked connection error must not trigger another Chrome launch');
 }
 
+async function testPerAttemptMemoryMonitorStopsBeforeRetry() {
+  const makeChrome = (pid: number, port: number) => ({
+    process: { pid, exitCode: null as number | null, signalCode: null as string | null, killed: false },
+    port,
+    kill() {},
+  } as any);
+  let launches = 0;
+  let monitorStops = 0;
+  let reads = 0;
+  let firstRunnerStarted = false;
+  let rejectFirstAudit!: (error: Error) => void;
+  let resolveFirstAuditStarted!: () => void;
+  const firstAuditStarted = new Promise<void>((resolve) => { resolveFirstAuditStarted = resolve; });
+  const categoryRequests: string[][] = [];
+  const service = new LighthouseService({
+    launchChrome: async () => {
+      launches++;
+      if (launches === 2) assert.strictEqual(monitorStops, 1, 'the previous monitor is fully stopped before retry launch');
+      return makeChrome(800 + launches, 25000 + launches);
+    },
+    waitForChromeReady: async () => {},
+    runLighthouse: async (_url, flags) => {
+      categoryRequests.push([...(flags.onlyCategories as string[])]);
+      if (categoryRequests.length === 1) {
+        firstRunnerStarted = true;
+        resolveFirstAuditStarted();
+        return new Promise((_resolve, reject) => { rejectFirstAudit = reject; });
+      }
+      return {
+        lhr: {
+          categories: { accessibility: { score: 0.9 }, 'best-practices': { score: 0.8 }, seo: { score: 0.7 } },
+          audits: {}, finalDisplayedUrl: 'https://example.test/', runtimeError: null,
+        },
+        artifacts: {},
+      };
+    },
+    killChromeProcessTree: async () => {
+      rejectFirstAudit(new Error('Connection closed.'));
+    },
+    stopChrome: async (chrome) => { (chrome.process as any).exitCode = 0; },
+  });
+
+  const result = service.runAudit('https://example.test/', undefined, undefined, undefined, undefined, {
+    readAnonBytes: async () => {
+      if (!firstRunnerStarted) return 0;
+      return reads++ === 0 ? 900 : 0;
+    },
+    thresholdBytes: 850,
+    pollIntervalMs: 1,
+    onStop: () => { monitorStops++; },
+  });
+  await firstAuditStarted;
+  const metrics = await result;
+  assert.strictEqual(launches, 2);
+  assert.strictEqual(monitorStops, 2, 'each attempt stops its own memory monitor');
+  assert.deepStrictEqual(categoryRequests, [
+    ['performance', 'accessibility', 'best-practices', 'seo'],
+    ['accessibility', 'best-practices', 'seo'],
+  ]);
+  assert.strictEqual(metrics.accessibility, 90);
+}
+
+async function testChromeReadinessRetriesAndFailureCleansUp() {
+  let readinessRequests = 0;
+  const server = http.createServer((_request, response) => {
+    readinessRequests++;
+    if (readinessRequests === 1) response.writeHead(503).end('starting');
+    else response.writeHead(200, { 'Content-Type': 'application/json' })
+      .end(JSON.stringify({ webSocketDebuggerUrl: `ws://127.0.0.1:${(server.address() as any).port}/devtools/browser/test` }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as any).port as number;
+  try {
+    await waitForChromeDevTools(port);
+    assert.strictEqual(readinessRequests, 2, 'Chrome readiness retries a short initial unavailable response');
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+
+  const chrome = {
+    process: { pid: 902, exitCode: null as number | null, signalCode: null as string | null, killed: false },
+    port: 25902,
+    kill() {},
+  } as any;
+  let auditCalls = 0;
+  let cleanupCalls = 0;
+  const logs: unknown[][] = [];
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = ((...args: unknown[]) => { logs.push(args); }) as typeof console.log;
+  console.error = ((...args: unknown[]) => { logs.push(args); }) as typeof console.error;
+  try {
+    const service = new LighthouseService({
+      launchChrome: async () => chrome,
+      waitForChromeReady: async () => { throw new Error('Chrome DevTools readiness failed: endpoint unavailable'); },
+      runLighthouse: async () => { auditCalls++; throw new Error('must not reach Lighthouse'); },
+      stopChrome: async (launchedChrome) => {
+        cleanupCalls++;
+        (launchedChrome.process as any).exitCode = 0;
+      },
+    });
+    await assert.rejects(() => service.runAudit('https://example.test/'), /Chrome DevTools readiness failed/);
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+  assert.strictEqual(auditCalls, 0, 'Lighthouse does not start until the DevTools endpoint is ready');
+  assert.strictEqual(cleanupCalls, 2, 'each Chrome launch is cleaned up after readiness failure and existing retry policy');
+  assert.ok(logs.some((args) => JSON.stringify(args).includes('exitCode') && JSON.stringify(args).includes('0')),
+    'readiness failure logs Chrome exit state after cleanup');
+}
+
 async function run() {
   await testProcessGroupWait();
   await testCleanupFailurePropagation();
@@ -297,6 +416,8 @@ async function run() {
   await testMemoryAbortRetriesWithoutPerformance();
   await testMemorySafeAuditDoesNotRepeatTheSameCategories();
   await testMemoryAbortWinsChromeConnectionClosedRace();
+  await testPerAttemptMemoryMonitorStopsBeforeRetry();
+  await testChromeReadinessRetriesAndFailureCleansUp();
   const profileRoot = os.tmpdir();
   const profilesBefore = new Set((await fs.promises.readdir(profileRoot, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory() && entry.name.startsWith('lighthouse.'))

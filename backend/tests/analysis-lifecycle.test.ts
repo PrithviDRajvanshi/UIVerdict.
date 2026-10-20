@@ -150,12 +150,12 @@ async function runAnalysisLifecycleTests() {
       pollIntervalMs: 1,
       onStop: () => { pollerStopped += 1; },
     });
-    lighthouseService.runAudit = async (_url, _diagnostics, auditSignal) => {
+    lighthouseService.runAudit = async (_url, _diagnostics, _signal, _retrySignal, _categories, monitor) => {
       abortAuditCalls += 1;
       stageEvents.push('lighthouse');
-      return new Promise((resolve) => {
-        auditSignal?.addEventListener('abort', () => resolve(metrics), { once: true });
-      });
+      monitor?.onAbort?.(1, 0);
+      monitor?.onStop?.();
+      return metrics;
     };
     try {
       const memoryPartial = await memoryGuardedService.analyzeUrl('https://example.com/memory-limit', undefined, undefined, 'tech');
@@ -223,12 +223,12 @@ async function runAnalysisLifecycleTests() {
     };
     const previousCleanupMemoryLimit = process.env.LIGHTHOUSE_MEMORY_ABORT_BYTES;
     process.env.LIGHTHOUSE_MEMORY_ABORT_BYTES = '0';
-    lighthouseService.runAudit = async (_url, _diagnostics, auditSignal) => new Promise((_resolve, reject) => {
-      auditSignal?.addEventListener('abort', () => {
-        markBrowserCleanupFailure(cleanupFailure);
-        reject(cleanupFailure);
-      }, { once: true });
-    });
+    lighthouseService.runAudit = async (_url, _diagnostics, _signal, _retrySignal, _categories, monitor) => {
+      monitor?.onAbort?.(1, 0);
+      monitor?.onStop?.();
+      markBrowserCleanupFailure(cleanupFailure);
+      throw cleanupFailure;
+    };
     try {
       await assert.rejects(() => memoryGuardedService.analyzeUrl('https://example.com/abort-cleanup-failure', undefined, undefined, 'tech'), (error) => error === cleanupFailure,
         'browser cleanup failure during memory abort remains fail-closed and is rethrown');
