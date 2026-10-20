@@ -10,6 +10,7 @@ import { resolveVerdictLabel } from '../../validators/aiAnalysis.validator';
 export interface SaveAnalysisResultInput {
   metrics: LighthouseMetrics;
   aiAnalysis?: AiAnalysis;
+  overallScore?: number | null;
   status?: AnalysisStatus;
   screenshotArtifactName?: string;
   screenshotSha256?: string;
@@ -18,8 +19,9 @@ export interface SaveAnalysisResultInput {
 export interface SavedAnalysisReport {
   id: string;
   url: string;
+  mode: 'visual' | 'tech' | 'overall' | 'unknown';
   metrics: LighthouseMetrics;
-  aiStatus: 'AVAILABLE' | 'UNAVAILABLE';
+  aiStatus: 'AVAILABLE' | 'UNAVAILABLE' | 'NOT_REQUESTED';
   aiAnalysis: {
     visualDesignScore: number | null;
     overallVerdict: { score: number; label: VerdictLabel } | null;
@@ -34,6 +36,25 @@ export interface SavedAnalysisReport {
   verdictLabel: string | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+function reportMode(analysis: Analysis): SavedAnalysisReport['mode'] {
+  const visual = analysis.visualDesignScore !== null;
+  const technical = [analysis.performanceScore, analysis.accessibilityScore, analysis.bestPracticesScore, analysis.seoScore]
+    .some((score) => score !== null) || [analysis.firstContentfulPaint, analysis.largestContentfulPaint,
+      analysis.speedIndex, analysis.totalBlockingTime, analysis.cumulativeLayoutShift, analysis.timeToInteractive]
+      .some((metric) => metric !== null && metric.trim() !== '' && metric.toLowerCase() !== 'n/a');
+  if (visual && technical) return 'overall';
+  if (visual) return 'visual';
+  if (technical) return 'tech';
+  if (analysis.overallScore !== null) return 'overall';
+  return 'unknown';
+}
+
+function reportAiStatus(analysis: Analysis): SavedAnalysisReport['aiStatus'] {
+  if (analysis.visualDesignScore !== null || analysis.overallScore !== null) return 'AVAILABLE';
+  if (reportMode(analysis) === 'tech') return 'NOT_REQUESTED';
+  return 'UNAVAILABLE';
 }
 
 export interface UrlAggregateStats {
@@ -141,7 +162,7 @@ export class PostgresRepository {
     analysisId: string,
     input: SaveAnalysisResultInput
   ): Promise<Analysis> {
-    const overallScore = input.aiAnalysis
+    const overallScore = input.overallScore !== undefined ? input.overallScore : input.aiAnalysis
       ? calculateOverallScore(input.aiAnalysis.visualDesignScore, input.metrics)
       : null;
     return await prisma.analysis.update({
@@ -192,6 +213,7 @@ export class PostgresRepository {
     return {
       id: analysis.id,
       url: analysis.url,
+      mode: reportMode(analysis),
       status: analysis.status,
       visualDesignScore: analysis.visualDesignScore,
       validationReason: typeof analysis.playwrightDiagnostics === 'object' && analysis.playwrightDiagnostics !== null && 'validationReason' in analysis.playwrightDiagnostics
@@ -210,7 +232,7 @@ export class PostgresRepository {
         cumulativeLayoutShift: analysis.cumulativeLayoutShift ?? '',
         timeToInteractive: analysis.timeToInteractive ?? '',
       },
-      aiStatus: analysis.visualDesignScore === null && analysis.overallScore === null ? 'UNAVAILABLE' : 'AVAILABLE',
+      aiStatus: reportAiStatus(analysis),
       aiAnalysis: analysis.visualDesignScore === null && analysis.overallScore === null ? null : {
         visualDesignScore: analysis.visualDesignScore,
         overallVerdict: analysis.overallScore === null ? null : { score: analysis.overallScore, label: (analysis.verdictLabel ?? '') as VerdictLabel },
@@ -237,13 +259,23 @@ export class PostgresRepository {
    * Formats an Analysis record from PostgreSQL into the snapshot structure.
    */
   public formatAnalysisToSnapshot(analysis: Analysis): SavedAnalysisReport | null {
-    if (analysis.overallScore === null && analysis.performanceScore === null) {
+    const hasSectionScore = analysis.visualDesignScore !== null || [
+      analysis.performanceScore,
+      analysis.accessibilityScore,
+      analysis.bestPracticesScore,
+      analysis.seoScore,
+    ].some((score) => score !== null);
+    const hasTechnicalMetric = [analysis.firstContentfulPaint, analysis.largestContentfulPaint, analysis.speedIndex,
+      analysis.totalBlockingTime, analysis.cumulativeLayoutShift, analysis.timeToInteractive]
+      .some((metric) => metric !== null && metric.trim() !== '' && metric.toLowerCase() !== 'n/a');
+    if (!hasSectionScore && !hasTechnicalMetric && analysis.overallScore === null) {
       return null;
     }
 
     return {
       id: analysis.id,
       url: analysis.url,
+      mode: reportMode(analysis),
       status: analysis.status,
       visualDesignScore: analysis.visualDesignScore,
       validationReason: typeof analysis.playwrightDiagnostics === 'object' && analysis.playwrightDiagnostics !== null && 'validationReason' in analysis.playwrightDiagnostics
@@ -262,7 +294,7 @@ export class PostgresRepository {
         cumulativeLayoutShift: analysis.cumulativeLayoutShift ?? '',
         timeToInteractive: analysis.timeToInteractive ?? '',
       },
-      aiStatus: analysis.visualDesignScore === null && analysis.overallScore === null ? 'UNAVAILABLE' : 'AVAILABLE',
+      aiStatus: reportAiStatus(analysis),
       aiAnalysis: analysis.visualDesignScore === null && analysis.overallScore === null ? null : {
         visualDesignScore: analysis.visualDesignScore,
         overallVerdict: analysis.overallScore === null ? null : { score: analysis.overallScore, label: (analysis.verdictLabel ?? '') as VerdictLabel },

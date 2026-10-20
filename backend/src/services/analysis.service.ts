@@ -6,8 +6,6 @@ import { postgresRepository } from '../repositories/postgres/postgres.repository
 import { AnalysisStatus } from '@prisma/client';
 import { sanitizeDiagnosticMessage, sanitizeDiagnosticUrl } from './browser-diagnostics';
 import { TargetPageValidationError } from './target-page-validation';
-import { calculateOverallScore } from './scoring.service';
-import { resolveVerdictLabel } from '../validators/aiAnalysis.validator';
 import { PlaywrightDiagnosticMetadata } from './browser-diagnostics';
 import { AnalysisConcurrencyQueue } from './analysis-concurrency';
 import { ApiError } from '../errors/ApiError';
@@ -16,6 +14,7 @@ import { isBrowserCleanupFailure } from './analysis-concurrency';
 
 const processAnalysisQueue = new AnalysisConcurrencyQueue();
 const DEFAULT_LIGHTHOUSE_MEMORY_ABORT_BYTES = 850_000_000;
+export type AnalysisMode = 'visual' | 'tech';
 
 type MemoryAnonReader = () => Promise<number | null>;
 
@@ -56,9 +55,10 @@ function unavailableLighthouseMetrics(): LighthouseMetrics {
 export interface AnalysisData {
   id: string;
   url: string;
+  mode: AnalysisMode;
   metrics: LighthouseMetrics;
   aiAnalysis: AiAnalysis | null;
-  aiStatus: 'AVAILABLE' | 'UNAVAILABLE';
+  aiStatus: 'AVAILABLE' | 'UNAVAILABLE' | 'NOT_REQUESTED';
   overallScore: number | null;
   verdictLabel: string | null;
   visualDesignScore: number | null;
@@ -82,7 +82,7 @@ export class AnalysisService {
     onStop?: () => void;
   } = {}) {}
 
-  public async analyzeUrl(url: string, userId?: string, signal?: AbortSignal): Promise<AnalysisResponse> {
+  public async analyzeUrl(url: string, userId?: string, signal?: AbortSignal, mode: AnalysisMode = 'visual'): Promise<AnalysisResponse> {
     let analysisId: string | null = null;
     let pipelineStarted = false;
     try {
@@ -93,7 +93,7 @@ export class AnalysisService {
       console.log(`[AnalysisService] Analysis initiated in PostgreSQL: ${analysis.id} (Status: ${analysis.status})`);
       return await processAnalysisQueue.run(() => {
         pipelineStarted = true;
-        return this.runAnalysisPipeline(url, analysis, signal);
+        return this.runAnalysisPipeline(url, analysis, mode, signal);
       }, { analysisId, url }, signal);
     } catch (error) {
       if (analysisId && !pipelineStarted) {
@@ -108,7 +108,7 @@ export class AnalysisService {
     }
   }
 
-  private async runAnalysisPipeline(url: string, analysis: { id: string; status: AnalysisStatus }, signal?: AbortSignal): Promise<AnalysisResponse> {
+  private async runAnalysisPipeline(url: string, analysis: { id: string; status: AnalysisStatus }, mode: AnalysisMode, signal?: AbortSignal): Promise<AnalysisResponse> {
     const analysisId = analysis.id;
     let screenshotData: ScreenshotResult | null = null;
     const latestPlaywrightDiagnostics: { current: PlaywrightDiagnosticMetadata | null } = { current: null };
@@ -118,6 +118,7 @@ export class AnalysisService {
     let technicalUnavailableReason: string | null = null;
 
     try {
+      if (mode === 'visual') {
       try {
         // Playwright resolves only after its browser cleanup completes.
         if (signal?.aborted) throw new Error('Analysis request was cancelled');
@@ -134,6 +135,7 @@ export class AnalysisService {
           console.log(`[AnalysisService] Gemini AI visual assessment completed for URL: ${sanitizeDiagnosticUrl(url)} (Visual design score: ${aiAnalysis.visualDesignScore})`);
         } catch (aiError: any) {
           console.warn(`[AnalysisService] AI feedback unavailable: ${sanitizeDiagnosticMessage(aiError?.message || 'unknown error')}`);
+          throw new ApiError(503, 'Temporarily unavailable, try again');
         }
       } finally {
         if (screenshotData) {
@@ -148,6 +150,10 @@ export class AnalysisService {
           }
         }
       }
+      }
+      if (mode === 'visual') {
+        metrics = unavailableLighthouseMetrics();
+      } else {
       if (signal?.aborted) throw new Error('Analysis request was cancelled');
 
       // Lighthouse owns its Chrome process. The monitor aborts through LighthouseService,
@@ -208,7 +214,7 @@ export class AnalysisService {
         technicalUnavailable = true;
         metrics = unavailableLighthouseMetrics();
         technicalUnavailableReason = memoryAbortReason ?? sanitizeDiagnosticMessage(lighthouseError?.message || 'Lighthouse audit unavailable').slice(0, 160);
-        console.warn('[AnalysisService] Continuing with a partial visual report because Lighthouse is unavailable:', {
+        console.warn('[AnalysisService] Lighthouse returned no usable technical results:', {
           analysisId,
           reason: technicalUnavailableReason,
         });
@@ -228,12 +234,14 @@ export class AnalysisService {
         technicalUnavailable = true;
         technicalUnavailableReason = memoryAbortReason;
       }
+      }
       if (signal?.aborted) throw new Error('Analysis request was cancelled');
       const hasTechnicalResult = [metrics.performance, metrics.accessibility, metrics.bestPractices, metrics.seo,
         metrics.firstContentfulPaint, metrics.largestContentfulPaint, metrics.speedIndex,
         metrics.totalBlockingTime, metrics.cumulativeLayoutShift, metrics.timeToInteractive]
         .some((value) => value !== null && value !== '' && !(typeof value === 'string' && value.toLowerCase() === 'n/a'));
-      if (!aiAnalysis && !hasTechnicalResult) {
+      const modeHasResult = mode === 'visual' ? aiAnalysis !== null : hasTechnicalResult;
+      if (!modeHasResult) {
         throw new ApiError(503, 'Temporarily unavailable, try again');
       }
 
@@ -242,28 +250,29 @@ export class AnalysisService {
       await postgresRepository.saveAnalysisResult(analysis.id, {
         metrics,
         ...(aiAnalysis ? { aiAnalysis } : {}),
+        overallScore: null,
         status: AnalysisStatus.COMPLETED,
-        screenshotArtifactName: screenshotData.filename,
-        screenshotSha256: screenshotData.sha256,
+        ...(screenshotData ? { screenshotArtifactName: screenshotData.filename, screenshotSha256: screenshotData.sha256 } : {}),
       });
-      const overallScore = aiAnalysis ? calculateOverallScore(aiAnalysis.visualDesignScore, metrics) : null;
-      const partial = technicalUnavailable || [metrics.performance, metrics.accessibility, metrics.bestPractices, metrics.seo].some((score) => score === null);
+      const overallScore = null;
+      const partial = mode === 'tech' && (technicalUnavailable || [metrics.performance, metrics.accessibility, metrics.bestPractices, metrics.seo].some((score) => score === null));
       console.log(`[AnalysisService] PostgreSQL persistence complete. Analysis status marked as COMPLETED.`);
 
       // 6. Final response construction and return
       return {
         status: 'success',
-        message: technicalUnavailable
-          ? 'Analysis completed with partial technical results'
-          : aiAnalysis ? 'Analysis completed successfully' : 'Lighthouse analysis completed; AI feedback is unavailable',
+        message: mode === 'visual'
+          ? 'Visual analysis completed successfully'
+          : technicalUnavailable ? 'Technical analysis completed with partial results' : 'Technical analysis completed successfully',
         data: {
           id: analysis.id,
           url,
+          mode,
           metrics,
           aiAnalysis,
-          aiStatus: aiAnalysis ? 'AVAILABLE' : 'UNAVAILABLE',
+          aiStatus: mode === 'tech' ? 'NOT_REQUESTED' : aiAnalysis ? 'AVAILABLE' : 'UNAVAILABLE',
           overallScore,
-          verdictLabel: overallScore === null ? null : resolveVerdictLabel(overallScore),
+          verdictLabel: null,
           visualDesignScore: aiAnalysis?.visualDesignScore ?? null,
           targetValidationStatus: 'VALID',
           partial,
@@ -290,9 +299,10 @@ export class AnalysisService {
           data: {
             id: analysisId,
             url,
+            mode,
             metrics: { performance: null, accessibility: null, bestPractices: null, seo: null, firstContentfulPaint: '', largestContentfulPaint: '', speedIndex: '', totalBlockingTime: '', cumulativeLayoutShift: '', timeToInteractive: '' },
             aiAnalysis: null,
-            aiStatus: 'UNAVAILABLE',
+            aiStatus: mode === 'tech' ? 'NOT_REQUESTED' : 'UNAVAILABLE',
             overallScore: null,
             verdictLabel: null,
             visualDesignScore: null,
