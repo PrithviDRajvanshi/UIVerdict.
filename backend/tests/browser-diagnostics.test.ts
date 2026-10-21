@@ -45,6 +45,7 @@ async function run() {
   assert.ok(!safeMessage.includes('?q='));
   assert.ok(!sanitizeDiagnosticMessage('key=AIza123456789012345678901234').includes('AIza'));
   assert.strictEqual(sanitizeDiagnosticMessage('x'.repeat(400)).length, MAX_DIAGNOSTIC_MESSAGE_LENGTH);
+  assert.strictEqual(sanitizeDiagnosticMessage('x'.repeat(400), 300).length, 300);
   const bounded: number[] = [];
   for (let i = 0; i < MAX_DIAGNOSTIC_EVENTS + 5; i++) appendBounded(bounded, i);
   assert.strictEqual(bounded.length, MAX_DIAGNOSTIC_EVENTS);
@@ -55,7 +56,7 @@ async function run() {
       return;
     }
     if (request.url === '/app.js') {
-      response.writeHead(200, { 'Content-Type': 'text/javascript' }).end("document.querySelector('main').textContent = 'Loaded external application script';");
+      response.writeHead(200, { 'Content-Type': 'text/javascript' }).end("document.querySelector('main').textContent = 'Loaded external application script ' + 'x'.repeat(400);");
       return;
     }
     if (request.url === '/app.css') {
@@ -86,6 +87,7 @@ async function run() {
     assert.strictEqual(diagnostic.title, 'Diagnostic test');
     assert.strictEqual(diagnostic.readyState, 'complete');
     assert.ok(diagnostic.bodyTextLength > 0);
+    assert.strictEqual(diagnostic.bodyText.length, 300, 'logged page text is capped at 300 sanitized characters');
     assert.ok(!diagnostic.browserEvents.failedRequests.some((event: any) => /\/app\.(js|css)$/.test(event.url)), 'Chromium must load local application assets with native fetch metadata');
     assert.ok(diagnostic.visibleElementCount >= 3);
     assert.strictEqual(diagnostic.imageCount, 1);

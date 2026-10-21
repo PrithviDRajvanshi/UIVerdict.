@@ -32,8 +32,39 @@ export interface LighthouseMetrics {
 export type LighthouseDiagnosticsCallback = (diagnostics: LighthouseDiagnosticMetadata) => Promise<void>;
 
 const LIGHTHOUSE_AUDIT_TIMEOUT_MS = 120_000;
+const CHROME_READY_RETRIES = 5;
+const CHROME_READY_RETRY_DELAY_MS = 100;
+const LIGHTHOUSE_MEMORY_ABORT_POLL_INTERVAL_MS = 500;
+const LIGHTHOUSE_MEMORY_ABORT_CONSECUTIVE_SAMPLES = 3;
 const LIGHTHOUSE_CATEGORIES = ['performance', 'accessibility', 'best-practices', 'seo'];
 export const LIGHTHOUSE_MEMORY_SAFE_CATEGORIES = ['accessibility', 'best-practices', 'seo'];
+
+export interface LighthouseMemoryMonitor {
+  readAnonBytes: () => Promise<number | null>;
+  thresholdBytes: number;
+  pollIntervalMs?: number;
+  onAbort?: (anonBytes: number, thresholdBytes: number) => void;
+  onStop?: () => void;
+}
+
+export async function waitForChromeDevTools(port: number): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= CHROME_READY_RETRIES; attempt++) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(500) });
+      if (!response.ok) throw new Error(`Chrome DevTools returned HTTP ${response.status}`);
+      const version = await response.json() as { webSocketDebuggerUrl?: unknown };
+      if (typeof version.webSocketDebuggerUrl !== 'string' || !version.webSocketDebuggerUrl.startsWith(`ws://127.0.0.1:${port}/`)) {
+        throw new Error('Chrome DevTools returned an invalid WebSocket endpoint');
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < CHROME_READY_RETRIES) await new Promise((resolve) => setTimeout(resolve, CHROME_READY_RETRY_DELAY_MS));
+    }
+  }
+  throw new Error(`Chrome DevTools readiness failed after ${CHROME_READY_RETRIES} attempts: ${sanitizeDiagnosticMessage((lastError as any)?.message || lastError || 'unavailable')}`);
+}
 
 async function logCgroupMemorySnapshot(stage: 'before_launch' | 'after_audit' | 'after_cleanup', attempt: number): Promise<void> {
   try {
@@ -284,6 +315,7 @@ interface LighthouseServiceDependencies {
   runLighthouse: (targetUrl: string, flags: Record<string, unknown>, config: Record<string, unknown>) => Promise<any>;
   stopChrome: typeof stopChromeAndWait;
   killChromeProcessTree: typeof stopChromeProcessTreeAndWait;
+  waitForChromeReady: (port: number) => Promise<void>;
   auditTimeoutMs: number;
 }
 
@@ -300,6 +332,7 @@ export class LighthouseService {
       }),
       stopChrome: dependencies.stopChrome ?? stopChromeAndWait,
       killChromeProcessTree: dependencies.killChromeProcessTree ?? stopChromeProcessTreeAndWait,
+      waitForChromeReady: dependencies.waitForChromeReady ?? waitForChromeDevTools,
       auditTimeoutMs: dependencies.auditTimeoutMs ?? LIGHTHOUSE_AUDIT_TIMEOUT_MS,
     };
   }
@@ -443,6 +476,28 @@ export class LighthouseService {
 
       console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Dedicated Chrome listening on port ${chrome.port}`);
 
+      try {
+        await this.dependencies.waitForChromeReady(chrome.port);
+      } catch (readinessError) {
+        try {
+          console.error(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Chrome DevTools readiness failed:`, {
+            port: chrome.port,
+            pid: chrome.process.pid ?? null,
+            name: sanitizeDiagnosticMessage((readinessError as any)?.name || 'Error'),
+            message: sanitizeDiagnosticMessage((readinessError as any)?.message || readinessError),
+          });
+        } catch {
+          // Readiness diagnostics must not replace the connection error.
+        }
+        throw readinessError;
+      }
+      if (signal?.aborted) {
+        const reason = typeof signal.reason === 'string' ? signal.reason : 'cancelled';
+        const abortError = new ApiError(503, `Lighthouse audit aborted: ${reason}`) as ApiError & { lighthouseAbort?: boolean };
+        abortError.lighthouseAbort = true;
+        throw abortError;
+      }
+
       const flags = {
         logLevel: 'error' as const,
         output: 'json' as const,
@@ -540,6 +595,13 @@ export class LighthouseService {
       console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Completed successfully with performance score ${metrics.performance}`);
       return metrics;
     } catch (error: any) {
+      // Chrome may close the DevTools connection before the abort promise wins
+      // the race. The monitor's per-attempt signal is authoritative here.
+      if (signal?.aborted && /memory limit/i.test(String(signal.reason ?? '')) && !isBrowserCleanupFailure(error)) {
+        const memoryAbort = new ApiError(503, 'Lighthouse audit aborted: memory limit') as ApiError & { lighthouseAbort?: boolean };
+        memoryAbort.lighthouseAbort = true;
+        error = memoryAbort;
+      }
       auditError = error;
       logAttemptError(error, attempt, maxAttempts, lhrRuntimeError);
       auditDurationMs = auditDurationMs ?? Date.now() - auditStartedAt;
@@ -565,7 +627,12 @@ export class LighthouseService {
           console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Cleaning up Chrome process...`);
           try {
             await this.dependencies.stopChrome(chrome);
-            console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Chrome process exited and cleanup completed`);
+            console.log(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Chrome process exited and cleanup completed`, {
+              pid: chrome.process.pid ?? null,
+              exitCode: chrome.process.exitCode,
+              signalCode: chrome.process.signalCode,
+              killed: chrome.process.killed,
+            });
           } catch (killErr) {
             const cleanupError = new ApiError(500, 'Lighthouse Chrome process cleanup failed');
             const propagatedError = auditError && (typeof auditError === 'object' || typeof auditError === 'function')
@@ -574,6 +641,12 @@ export class LighthouseService {
             markBrowserCleanupFailure(propagatedError);
             try {
               console.error('[Lighthouse] Warning closing Chrome:', sanitizeDiagnosticMessage((killErr as any)?.message || killErr));
+              console.error(`[Lighthouse] Attempt ${attempt}/${maxAttempts}: Chrome exit state after cleanup failure:`, {
+                pid: chrome.process.pid ?? null,
+                exitCode: chrome.process.exitCode,
+                signalCode: chrome.process.signalCode,
+                killed: chrome.process.killed,
+              });
             } catch {
               // The propagated error has already been marked for fail-closed handling.
             }
@@ -599,19 +672,98 @@ export class LighthouseService {
     }
   }
 
+  private async runAttemptWithMonitor(
+    targetUrl: string,
+    attempt: number,
+    maxAttempts: number,
+    onDiagnostics: LighthouseDiagnosticsCallback | undefined,
+    externalSignal: AbortSignal | undefined,
+    onlyCategories: string[],
+    memoryMonitor?: LighthouseMemoryMonitor,
+  ): Promise<LighthouseMetrics> {
+    const attemptController = new AbortController();
+    const forwardExternalAbort = () => attemptController.abort(externalSignal?.reason ?? 'request cancelled');
+    if (externalSignal?.aborted) forwardExternalAbort();
+    else externalSignal?.addEventListener('abort', forwardExternalAbort, { once: true });
+
+    let stopped = false;
+    let resolveStopped!: () => void;
+    const stoppedPromise = new Promise<void>((resolve) => { resolveStopped = resolve; });
+    let timer: NodeJS.Timeout | undefined;
+    let wakePoller: (() => void) | undefined;
+    const pollIntervalMs = memoryMonitor?.pollIntervalMs ?? LIGHTHOUSE_MEMORY_ABORT_POLL_INTERVAL_MS;
+    let consecutiveAboveThresholdSamples = 0;
+    const poller = memoryMonitor ? (async () => {
+      while (!stopped && !attemptController.signal.aborted) {
+        await new Promise<void>((resolve) => {
+          let done = false;
+          const wake = () => {
+            if (done) return;
+            done = true;
+            wakePoller = undefined;
+            resolve();
+          };
+          wakePoller = wake;
+          timer = setTimeout(wake, pollIntervalMs);
+        });
+        if (stopped || attemptController.signal.aborted) return;
+        let anonBytes: number | null = null;
+        try {
+          const readPromise = memoryMonitor.readAnonBytes();
+          const result = await Promise.race([readPromise.then((value) => ({ value })), stoppedPromise.then(() => null)]);
+          if (result === null) return;
+          anonBytes = result.value;
+        } catch {
+          // Cgroup data is best-effort; unreadable snapshots are skipped silently.
+        }
+        if (!stopped) {
+          consecutiveAboveThresholdSamples = anonBytes !== null && anonBytes > memoryMonitor.thresholdBytes
+            ? consecutiveAboveThresholdSamples + 1
+            : 0;
+          if (consecutiveAboveThresholdSamples >= LIGHTHOUSE_MEMORY_ABORT_CONSECUTIVE_SAMPLES) {
+            try {
+              memoryMonitor.onAbort?.(anonBytes!, memoryMonitor.thresholdBytes);
+            } catch {
+              // Logging hooks must not prevent the abort.
+            }
+            attemptController.abort('memory limit');
+            return;
+          }
+        }
+      }
+    })() : Promise.resolve();
+
+    try {
+      return await this.runSingleAudit(targetUrl, attempt, maxAttempts, onDiagnostics, attemptController.signal, onlyCategories);
+    } finally {
+      stopped = true;
+      resolveStopped();
+      if (timer) clearTimeout(timer);
+      wakePoller?.();
+      externalSignal?.removeEventListener('abort', forwardExternalAbort);
+      await poller;
+      try {
+        memoryMonitor?.onStop?.();
+      } catch {
+        // Monitoring cleanup must not mask the audit result or failure.
+      }
+    }
+  }
+
   public async runAudit(
     targetUrl: string,
     onDiagnostics?: LighthouseDiagnosticsCallback,
     signal?: AbortSignal,
     retrySignal?: AbortSignal,
     initialCategories: string[] = LIGHTHOUSE_CATEGORIES,
+    memoryMonitor?: LighthouseMemoryMonitor,
   ): Promise<LighthouseMetrics> {
     const MAX_ATTEMPTS = 2;
     let lastError: any = null;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
-        return await this.runSingleAudit(targetUrl, attempt, MAX_ATTEMPTS, onDiagnostics, signal, initialCategories);
+        return await this.runAttemptWithMonitor(targetUrl, attempt, MAX_ATTEMPTS, onDiagnostics, signal, initialCategories, memoryMonitor);
       } catch (error: any) {
         lastError = error;
         if (isBrowserCleanupFailure(error) || (error instanceof ApiError && error.statusCode === 504)) {
@@ -621,7 +773,8 @@ export class LighthouseService {
           if (/memory limit/i.test(String(error.message || ''))) {
             if (!initialCategories.includes('performance')) throw error;
             console.warn('[Lighthouse] Retrying once without the performance category after a memory abort');
-            return this.runSingleAudit(targetUrl, 1, 1, onDiagnostics, retrySignal, LIGHTHOUSE_MEMORY_SAFE_CATEGORIES);
+            const retryExternalSignal = retrySignal ?? (signal?.aborted && /memory limit/i.test(String(signal.reason ?? '')) ? undefined : signal);
+            return this.runAttemptWithMonitor(targetUrl, 1, 1, onDiagnostics, retryExternalSignal, LIGHTHOUSE_MEMORY_SAFE_CATEGORIES, memoryMonitor);
           }
           throw error;
         }

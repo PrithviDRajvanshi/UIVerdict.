@@ -127,7 +127,7 @@ export function sanitizeDiagnosticUrl(value: string): string {
 }
 
 /** Redacts common secret assignments and strips URL query strings from event messages. */
-export function sanitizeDiagnosticMessage(value: unknown): string {
+export function sanitizeDiagnosticMessage(value: unknown, maxLength = MAX_DIAGNOSTIC_MESSAGE_LENGTH): string {
   const message = String(value ?? '');
   return message
     .replace(/\bauthorization\b\s*[:=]\s*(?:(?:bearer|basic)\s+)?(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, 'authorization=[redacted]')
@@ -141,7 +141,7 @@ export function sanitizeDiagnosticMessage(value: unknown): string {
       const candidate = trailing ? rawUrl.slice(0, -trailing.length) : rawUrl;
       return sanitizeDiagnosticUrl(candidate) + trailing;
     })
-    .slice(0, MAX_DIAGNOSTIC_MESSAGE_LENGTH);
+    .slice(0, maxLength);
 }
 
 export function appendBounded<T>(events: T[], event: T): void {

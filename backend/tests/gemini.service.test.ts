@@ -47,6 +47,7 @@ async function run() {
     assert.strictEqual(primaryResult.visualDesignScore, 84);
     assert.strictEqual(primaryResult.overallVerdict, undefined, 'Gemini does not provide the combined overall score');
     assert.strictEqual(primary.calls(), 1, 'primary success should make one call');
+    assert.strictEqual(primaryRequest.model, config.geminiLastFallbackModel, 'flash-lite is tried before other configured models');
     assert.strictEqual(primaryRequest.contents.length, 2, 'text prompt and screenshot remain multimodal input');
     assert.ok(!primaryRequest.contents[0].text.includes('Lighthouse'), 'Gemini prompt receives no Lighthouse categories or metrics');
     assert.strictEqual(primaryRequest.contents[1].inlineData.mimeType, 'image/png');
@@ -101,11 +102,11 @@ async function run() {
     const fallbackModels: string[] = [];
     const fallback = makeService(async (req) => {
       fallbackModels.push(req.model);
-      if (req.model === config.geminiModel) throw Object.assign(new Error('UNAVAILABLE'), { status: 503 });
+      if (req.model === config.geminiLastFallbackModel) throw Object.assign(new Error('UNAVAILABLE'), { status: 503 });
       return { text: JSON.stringify(valid) };
     });
     await fallback.service.generateAnalysis(input);
-    assert.deepStrictEqual(fallbackModels, [config.geminiModel, config.geminiFallbackModel]);
+    assert.deepStrictEqual(fallbackModels, [config.geminiLastFallbackModel, config.geminiModel]);
 
     const exhausted = makeService(async () => { throw Object.assign(new Error('busy'), { status: 429 }); });
     await assert.rejects(() => exhausted.service.generateAnalysis(input), /AI feedback is unavailable/);
