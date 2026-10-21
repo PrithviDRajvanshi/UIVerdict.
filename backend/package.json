@@ -11,7 +11,7 @@
     "test:screenshot-capture": "ts-node tests/screenshot-capture.test.ts",
     "start": "node dist/server.js",
     "dev": "ts-node src/server.ts",
-    "test": "ts-node tests/auth-middleware.test.ts && ts-node tests/report-access.test.ts && ts-node tests/auth.service.test.ts && ts-node tests/gemini.service.test.ts && ts-node tests/persistence.service.test.ts && ts-node tests/browser-diagnostics.test.ts && ts-node tests/diagnostic-persistence.test.ts && ts-node tests/screenshot-retention.test.ts && ts-node tests/lighthouse-diagnostics.test.ts"
+    "test": "ts-node tests/auth-middleware.test.ts && ts-node tests/report-access.test.ts && ts-node tests/auth.service.test.ts && ts-node tests/gemini.service.test.ts && ts-node tests/persistence.service.test.ts && ts-node tests/browser-diagnostics.test.ts && ts-node tests/diagnostic-persistence.test.ts && ts-node tests/screenshot-retention.test.ts && ts-node tests/lighthouse-diagnostics.test.ts && ts-node tests/pagespeed.service.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.16.0",

@@ -6,6 +6,7 @@ import { postgresRepository } from '../src/repositories/postgres/postgres.reposi
 import { playwrightService } from '../src/services/playwright.service';
 import { lighthouseService, LighthouseMetrics } from '../src/services/lighthouse.service';
 import { geminiService } from '../src/services/gemini.service';
+import { pageSpeedService } from '../src/services/pagespeed.service';
 
 async function run() {
   const validUrl = 'https://example.test/';
@@ -41,7 +42,10 @@ async function run() {
     remove: playwrightService.removeScreenshot,
     audit: lighthouseService.runAudit,
     gemini: geminiService.generateAnalysis,
+    pagespeed: pageSpeedService.runAudit,
   };
+  const originalTechAuditProvider = process.env.TECH_AUDIT_PROVIDER;
+  const originalPsiApiKey = process.env.PSI_API_KEY;
   const events: string[] = [];
   const saved: any[] = [];
   let nextId = 0;
@@ -59,6 +63,8 @@ async function run() {
   };
 
   try {
+    process.env.TECH_AUDIT_PROVIDER = 'local';
+    process.env.PSI_API_KEY = 'test-psi-key';
     postgresRepository.createAnalysisTransaction = async () => ({
       project: {} as any,
       analysis: { id: `mode-test-${++nextId}`, status: AnalysisStatus.PROCESSING } as any,
@@ -99,6 +105,21 @@ async function run() {
     assert.strictEqual(saved[1].overallScore, null);
     assert.strictEqual(Object.hasOwn(saved[1], 'aiAnalysis'), false);
 
+    events.length = 0;
+    process.env.TECH_AUDIT_PROVIDER = 'psi';
+    process.env.PSI_API_KEY = 'test-psi-key';
+    pageSpeedService.runAudit = async () => { events.push('psi'); throw new Error('upstream unavailable'); };
+    await assert.rejects(() => service.analyzeUrl(validUrl, undefined, undefined, 'tech'),
+      (error: any) => error.statusCode === 503 && error.message === 'Temporarily unavailable, try again');
+    assert.deepStrictEqual(events, ['psi'], 'PSI failure returns the compatible unavailable response without local Lighthouse fallback');
+    assert.strictEqual(saved.length, 2, 'an unavailable PSI audit is not persisted as a completed report');
+
+    events.length = 0;
+    delete process.env.TECH_AUDIT_PROVIDER;
+    await assert.rejects(() => service.analyzeUrl(validUrl, undefined, undefined, 'tech'),
+      (error: any) => error.statusCode === 503 && error.message === 'Temporarily unavailable, try again');
+    assert.deepStrictEqual(events, ['psi'], 'PSI is the default technical provider when PSI_API_KEY is configured');
+
     console.log('Analysis mode pipeline and validation tests passed.');
   } finally {
     postgresRepository.createAnalysisTransaction = original.create;
@@ -109,6 +130,11 @@ async function run() {
     playwrightService.removeScreenshot = original.remove;
     lighthouseService.runAudit = original.audit;
     geminiService.generateAnalysis = original.gemini;
+    pageSpeedService.runAudit = original.pagespeed;
+    if (originalTechAuditProvider === undefined) delete process.env.TECH_AUDIT_PROVIDER;
+    else process.env.TECH_AUDIT_PROVIDER = originalTechAuditProvider;
+    if (originalPsiApiKey === undefined) delete process.env.PSI_API_KEY;
+    else process.env.PSI_API_KEY = originalPsiApiKey;
   }
 }
 

@@ -29,4 +29,4 @@ EXPOSE 8080
 # Database migrations run as a one-time deployment pre-deploy command (`npm run migrate`).
 # The application container starts only the server to avoid per-replica migration races.
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["npm", "run", "start"]
+CMD ["node", "dist/server.js"]

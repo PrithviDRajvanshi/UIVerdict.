@@ -36,6 +36,13 @@ function lighthouseMemoryThresholdBytes(): number {
   return Number.isFinite(configured) && configured >= 0 ? configured : DEFAULT_LIGHTHOUSE_MEMORY_ABORT_BYTES;
 }
 
+function technicalAuditProvider(): 'psi' | 'local' {
+  const configured = process.env.TECH_AUDIT_PROVIDER?.trim();
+  if (configured === 'psi' || configured === 'local') return configured;
+  if (configured) throw new ApiError(503, 'Temporarily unavailable, try again');
+  return process.env.PSI_API_KEY ? 'psi' : 'local';
+}
+
 function unavailableLighthouseMetrics(): LighthouseMetrics {
   return {
     performance: null,
@@ -155,6 +162,18 @@ export class AnalysisService {
       if (mode === 'visual') {
         metrics = unavailableLighthouseMetrics();
       } else {
+      if (technicalAuditProvider() === 'psi') {
+        if (signal?.aborted) throw new Error('Analysis request was cancelled');
+        try {
+          const { pageSpeedService } = await import('./pagespeed.service');
+          metrics = await pageSpeedService.runAudit(url, signal);
+          console.log(`[AnalysisService] PageSpeed Insights audit completed for URL: ${sanitizeDiagnosticUrl(url)}`);
+        } catch (psiError) {
+          if (signal?.aborted) throw psiError;
+          console.warn('[AnalysisService] PageSpeed Insights audit unavailable');
+          throw new ApiError(503, 'Temporarily unavailable, try again');
+        }
+      } else {
       const { LIGHTHOUSE_MEMORY_SAFE_CATEGORIES, lighthouseService } = await import('./lighthouse.service');
       if (signal?.aborted) throw new Error('Analysis request was cancelled');
 
@@ -195,6 +214,7 @@ export class AnalysisService {
       if (memoryAbortReason) {
         technicalUnavailable = true;
         technicalUnavailableReason = memoryAbortReason;
+      }
       }
       }
       if (signal?.aborted) throw new Error('Analysis request was cancelled');
