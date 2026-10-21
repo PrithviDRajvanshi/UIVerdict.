@@ -1,4 +1,5 @@
 import assert from 'assert';
+import { EventEmitter } from 'events';
 import fs from 'fs';
 import http from 'http';
 import os from 'os';
@@ -138,9 +139,15 @@ async function testAuditTimeoutKillsChromeAndUsesResourceSettings() {
   assert.strictEqual(lighthouseCalls, 1, 'a timeout should fail fast without retrying the audit');
   assert.strictEqual(killTreeCalls, 1, 'the Chrome process tree is terminated before timeout propagation');
   assert.ok(launchOptions.chromeFlags.includes('--renderer-process-limit=1'));
+  assert.ok(launchOptions.chromeFlags.includes('--headless=new'));
+  assert.ok(launchOptions.chromeFlags.includes('--disable-gpu'));
+  assert.ok(launchOptions.chromeFlags.includes('--disable-software-rasterizer'));
+  assert.ok(launchOptions.chromeFlags.includes('--disable-dev-shm-usage'));
+  assert.ok(launchOptions.chromeFlags.includes('--mute-audio'));
   assert.ok(launchOptions.chromeFlags.includes('--disable-extensions'));
   assert.ok(launchOptions.chromeFlags.includes('--disable-background-networking'));
   assert.ok(launchOptions.chromeFlags.includes('--disable-component-update'));
+  assert.ok(launchOptions.chromeFlags.includes('--js-flags=--max-old-space-size=192'));
   assert.strictEqual(launchOptions.chromeFlags.includes('--disable-features=site-per-process'), false,
     'site isolation remains enabled');
   assert.strictEqual(lighthouseConfig.settings.disableFullPageScreenshot, true);
@@ -157,6 +164,7 @@ async function testAbortCleanupFailureIsMarked() {
   let resolveAuditStarted!: () => void;
   const auditStarted = new Promise<void>((resolve) => { resolveAuditStarted = resolve; });
   let killTreeCalls = 0;
+  let monitorStops = 0;
   const service = new LighthouseService({
     launchChrome: async () => chrome,
     waitForChromeReady: async () => {},
@@ -168,12 +176,66 @@ async function testAbortCleanupFailureIsMarked() {
     stopChrome: async () => {},
   });
   const controller = new AbortController();
-  const audit = service.runAudit('https://example.test/', undefined, controller.signal);
+  const audit = service.runAudit('https://example.test/', undefined, controller.signal, undefined, undefined, {
+    readAnonBytes: async () => 0,
+    thresholdBytes: 850,
+    pollIntervalMs: 1000,
+    onStop: () => { monitorStops++; },
+  });
   await auditStarted;
   controller.abort('memory limit');
   await assert.rejects(audit, (error: unknown) => isBrowserCleanupFailure(error) && /memory limit/.test((error as Error).message),
     'cleanup failure while aborting Lighthouse marks the original abort error for fail-closed handling');
   assert.strictEqual(killTreeCalls, 1);
+  assert.strictEqual(monitorStops, 1, 'poller stops in finally even when cleanup fails');
+}
+
+async function testChildProcessIsKilledOnAbort() {
+  const chrome = {
+    process: { pid: 656, exitCode: null, signalCode: null },
+    port: 23458,
+    kill() {},
+  } as any;
+  class FakeWorker extends EventEmitter {
+    exitCode: number | null = null;
+    signalCode: NodeJS.Signals | null = null;
+    killed = false;
+    send(_message: unknown, callback?: (error: Error | null) => void) {
+      callback?.(null);
+      resolveStarted();
+      return true;
+    }
+    kill() {
+      this.killed = true;
+      this.signalCode = 'SIGKILL';
+      queueMicrotask(() => this.emit('exit', null, 'SIGKILL'));
+      return true;
+    }
+  }
+  let resolveStarted!: () => void;
+  const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
+  const worker = new FakeWorker();
+  let chromeTreeKills = 0;
+  let workerExecArgv: string[] = [];
+  const service = new LighthouseService({
+    launchChrome: async () => chrome,
+    waitForChromeReady: async () => {},
+    forkWorker: ((_modulePath: string, _args: string[], options: any) => {
+      workerExecArgv = options.execArgv;
+      return worker as any;
+    }) as any,
+    killChromeProcessTree: async () => { chromeTreeKills++; },
+    stopChrome: async () => {},
+  });
+  const controller = new AbortController();
+  const audit = service.runAudit('https://example.test/', undefined, controller.signal, undefined,
+    ['accessibility', 'best-practices', 'seo']);
+  await started;
+  controller.abort('memory limit');
+  await assert.rejects(audit, (error: any) => error?.lighthouseAbort === true && /memory limit/.test(error.message));
+  assert.strictEqual(worker.killed, true, 'the Lighthouse child receives a hard termination on abort');
+  assert.ok(workerExecArgv.includes('--max-old-space-size=256'), 'Lighthouse child is launched with a 256 MB heap limit');
+  assert.ok(chromeTreeKills >= 1, 'the Chrome process tree is also terminated on abort');
 }
 
 async function testMemoryAbortRetriesWithoutPerformance() {
@@ -417,6 +479,7 @@ async function run() {
   await testLauncherKillFailureAfterExit();
   await testAuditTimeoutKillsChromeAndUsesResourceSettings();
   await testAbortCleanupFailureIsMarked();
+  await testChildProcessIsKilledOnAbort();
   await testMemoryAbortRetriesWithoutPerformance();
   await testMemorySafeAuditDoesNotRepeatTheSameCategories();
   await testMemoryAbortWinsChromeConnectionClosedRace();

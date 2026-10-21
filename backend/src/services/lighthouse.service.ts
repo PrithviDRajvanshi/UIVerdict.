@@ -1,5 +1,6 @@
 import * as chromeLauncher from 'chrome-launcher';
-import { execFileSync } from 'child_process';
+import { ChildProcess, ForkOptions, execFileSync, fork } from 'child_process';
+import path from 'path';
 import fs from 'fs/promises';
 import { chromium } from 'playwright';
 import { ApiError } from '../errors/ApiError';
@@ -36,6 +37,7 @@ const CHROME_READY_RETRIES = 5;
 const CHROME_READY_RETRY_DELAY_MS = 100;
 const LIGHTHOUSE_MEMORY_ABORT_POLL_INTERVAL_MS = 500;
 const LIGHTHOUSE_MEMORY_ABORT_CONSECUTIVE_SAMPLES = 3;
+const LIGHTHOUSE_HIGH_ANON_LOG_BYTES = 400_000_000;
 const LIGHTHOUSE_CATEGORIES = ['performance', 'accessibility', 'best-practices', 'seo'];
 export const LIGHTHOUSE_MEMORY_SAFE_CATEGORIES = ['accessibility', 'best-practices', 'seo'];
 
@@ -45,6 +47,68 @@ export interface LighthouseMemoryMonitor {
   pollIntervalMs?: number;
   onAbort?: (anonBytes: number, thresholdBytes: number) => void;
   onStop?: () => void;
+}
+
+export interface LighthouseProcessMemorySummary {
+  pid: number;
+  type: string;
+  rssMb: number;
+}
+
+function processTypeFromCmdline(cmdline: string): string {
+  const normalized = cmdline.toLowerCase();
+  if (/(^|\/)node(?:\.exe)?(?:\0|\s|$)/.test(normalized)) return 'node';
+  const type = normalized.match(/(?:^|\s|\0)--type=([a-z-]+)/)?.[1];
+  if (type === 'gpu-process') return 'gpu';
+  if (type) return type;
+  if (/chrom(e|ium)/.test(normalized)) return 'browser';
+  return 'other';
+}
+
+export async function readTopProcessRss(procRoot = '/proc', limit = 8): Promise<LighthouseProcessMemorySummary[]> {
+  const entries = await fs.readdir(procRoot, { withFileTypes: true });
+  const pids = entries.filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name)).map((entry) => Number(entry.name));
+  const rssByPid: Array<{ pid: number; rssBytes: number }> = [];
+  for (let offset = 0; offset < pids.length; offset += 64) {
+    const batch = pids.slice(offset, offset + 64);
+    const values = await Promise.all(batch.map(async (pid) => {
+      try {
+        const status = await fs.readFile(`${procRoot}/${pid}/status`, 'utf8');
+        const match = status.match(/^VmRSS:\s+(\d+)\s+kB/m);
+        return match ? { pid, rssBytes: Number(match[1]) * 1024 } : null;
+      } catch {
+        return null;
+      }
+    }));
+    rssByPid.push(...values.filter((value): value is { pid: number; rssBytes: number } => value !== null));
+  }
+  rssByPid.sort((a, b) => b.rssBytes - a.rssBytes);
+  const top = await Promise.all(rssByPid.slice(0, limit).map(async ({ pid, rssBytes }) => {
+    try {
+      const cmdline = (await fs.readFile(`${procRoot}/${pid}/cmdline`)).toString('utf8');
+      return { pid, type: processTypeFromCmdline(cmdline), rssMb: Math.round((rssBytes / 1024 / 1024) * 100) / 100 };
+    } catch {
+      return { pid, type: 'unavailable', rssMb: Math.round((rssBytes / 1024 / 1024) * 100) / 100 };
+    }
+  }));
+  return top;
+}
+
+async function logHighAnonProcesses(stage: string, anonBytes: number, attempt: number): Promise<void> {
+  try {
+    const topProcesses = await readTopProcessRss();
+    const { rss, heapUsed } = process.memoryUsage();
+    console.info('[Lighthouse] High-anon process snapshot:', {
+      attempt,
+      stage,
+      anonBytes,
+      topProcesses,
+      nodeRssBytes: rss,
+      nodeHeapUsedBytes: heapUsed,
+    });
+  } catch {
+    // Process diagnostics are best effort and must not affect the audit.
+  }
 }
 
 export async function waitForChromeDevTools(port: number): Promise<void> {
@@ -312,7 +376,8 @@ export async function stopChromeAndWait(
 
 interface LighthouseServiceDependencies {
   launchChrome: typeof chromeLauncher.launch;
-  runLighthouse: (targetUrl: string, flags: Record<string, unknown>, config: Record<string, unknown>) => Promise<any>;
+  runLighthouse?: (targetUrl: string, flags: Record<string, unknown>, config: Record<string, unknown>) => Promise<any>;
+  forkWorker: typeof fork;
   stopChrome: typeof stopChromeAndWait;
   killChromeProcessTree: typeof stopChromeProcessTreeAndWait;
   waitForChromeReady: (port: number) => Promise<void>;
@@ -325,11 +390,8 @@ export class LighthouseService {
   constructor(dependencies: Partial<LighthouseServiceDependencies> = {}) {
     this.dependencies = {
       launchChrome: dependencies.launchChrome ?? chromeLauncher.launch,
-      runLighthouse: dependencies.runLighthouse ?? (async (targetUrl, flags, config) => {
-        const lighthouseModule = await import('lighthouse');
-        const lighthouse = lighthouseModule.default || lighthouseModule;
-        return (lighthouse as any)(targetUrl, flags, config);
-      }),
+      runLighthouse: dependencies.runLighthouse,
+      forkWorker: dependencies.forkWorker ?? fork,
       stopChrome: dependencies.stopChrome ?? stopChromeAndWait,
       killChromeProcessTree: dependencies.killChromeProcessTree ?? stopChromeProcessTreeAndWait,
       waitForChromeReady: dependencies.waitForChromeReady ?? waitForChromeDevTools,
@@ -345,7 +407,94 @@ export class LighthouseService {
     signal?: AbortSignal,
   ): Promise<any> {
     let timeout: NodeJS.Timeout | undefined;
-    const audit = Promise.resolve().then(() => this.dependencies.runLighthouse(targetUrl, flags, config));
+    let worker: ChildProcess | null = null;
+    let audit: Promise<any>;
+    if (this.dependencies.runLighthouse) {
+      // Dependency injection keeps unit tests isolated; production uses the forked worker.
+      audit = Promise.resolve().then(() => this.dependencies.runLighthouse!(targetUrl, flags, config));
+    } else {
+      let isTypeScript = __filename.endsWith('.ts');
+      let workerPath = path.join(__dirname, `lighthouse-child.${isTypeScript ? 'ts' : 'js'}`);
+      if (isTypeScript) {
+        const compiledWorkerPath = path.resolve(__dirname, '../../dist/services/lighthouse-child.js');
+        try {
+          const [sourceStat, compiledStat] = await Promise.all([
+            fs.stat(path.join(__dirname, 'lighthouse-child.ts')),
+            fs.stat(compiledWorkerPath),
+          ]);
+          if (compiledStat.mtimeMs >= sourceStat.mtimeMs) {
+            workerPath = compiledWorkerPath;
+            isTypeScript = false;
+          }
+        } catch {
+          // Local development may not have compiled output; ts-node handles the source worker.
+        }
+      }
+      const execArgv = ['--max-old-space-size=256'];
+      if (isTypeScript) execArgv.push('-r', 'ts-node/register/transpile-only');
+      worker = this.dependencies.forkWorker(workerPath, [], {
+        execArgv,
+        stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+      });
+      audit = new Promise((resolve, reject) => {
+        let result: any;
+        let workerError: Error | null = null;
+        worker!.on('message', (message: any) => {
+          if (message?.type === 'result') result = message.result;
+          else if (message?.type === 'error') {
+            workerError = Object.assign(new Error(message.error?.message || 'Lighthouse child failed'), {
+              name: message.error?.name || 'Error',
+              code: message.error?.code || '',
+            });
+          }
+        });
+        worker!.once('error', reject);
+        worker!.once('exit', (code, signalCode) => {
+          if (workerError) reject(workerError);
+          else if (result !== undefined && code === 0) resolve(result);
+          else reject(new Error(`Lighthouse child exited without a result (code=${code}, signal=${signalCode})`));
+        });
+        worker!.send({ targetUrl, flags, config }, (error) => {
+          if (error) reject(error);
+        });
+      });
+    }
+
+    const terminateWorkerAndWait = async (): Promise<void> => {
+      if (!worker || worker.exitCode !== null || worker.signalCode !== null) return;
+      const exited = new Promise<void>((resolve) => worker!.once('exit', () => resolve()));
+      worker.kill('SIGKILL');
+      // A false return can race with a process that is already exiting; the
+      // exit wait below is the authoritative cleanup confirmation.
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          exited,
+          new Promise<never>((_resolve, reject) => {
+            timeoutHandle = setTimeout(() => reject(new Error('Timed out waiting for Lighthouse child process to exit')), 10000);
+          }),
+        ]);
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+      }
+    };
+    const terminateResources = async (originalError: object, stage: 'timeout' | 'abort'): Promise<void> => {
+      const results = await Promise.allSettled([
+        terminateWorkerAndWait(),
+        this.dependencies.killChromeProcessTree(chrome, 10000),
+      ]);
+      const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (!failures.length) return;
+      markBrowserCleanupFailure(originalError);
+      for (const failure of failures) {
+        try {
+          console.error(`[Lighthouse] Failed to confirm browser cleanup after audit ${stage}:`,
+            sanitizeDiagnosticMessage((failure.reason as any)?.message || failure.reason));
+        } catch {
+          // Preserve the original timeout or abort error.
+        }
+      }
+    };
     const timeoutPromise = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(async () => {
         const timeoutError = new ApiError(504, `Lighthouse audit exceeded ${this.dependencies.auditTimeoutMs}ms timeout`);
@@ -356,17 +505,7 @@ export class LighthouseService {
         } catch {
           // Logging must not prevent the timeout from terminating Chrome.
         }
-        try {
-          await this.dependencies.killChromeProcessTree(chrome, 10000);
-        } catch (cleanupError) {
-          markBrowserCleanupFailure(timeoutError);
-          try {
-            console.error('[Lighthouse] Failed to confirm Chrome process-tree termination after audit timeout:',
-              sanitizeDiagnosticMessage((cleanupError as any)?.message || cleanupError));
-          } catch {
-            // Preserve the timeout error and its fail-closed marker.
-          }
-        }
+        await terminateResources(timeoutError, 'timeout');
         reject(timeoutError);
       }, this.dependencies.auditTimeoutMs);
     });
@@ -377,17 +516,7 @@ export class LighthouseService {
         const reason = typeof signal?.reason === 'string' ? signal.reason : 'cancelled';
         const abortError = new ApiError(503, `Lighthouse audit aborted: ${reason}`);
         (abortError as ApiError & { lighthouseAbort?: boolean }).lighthouseAbort = true;
-        try {
-          await this.dependencies.killChromeProcessTree(chrome, 10000);
-        } catch (cleanupError) {
-          markBrowserCleanupFailure(abortError);
-          try {
-            console.error('[Lighthouse] Failed to confirm Chrome process-tree termination after audit abort:',
-              sanitizeDiagnosticMessage((cleanupError as any)?.message || cleanupError));
-          } catch {
-            // Preserve the abort error and its fail-closed marker.
-          }
-        }
+        await terminateResources(abortError, 'abort');
         reject(abortError);
       };
       abortListener = () => { void rejectAfterCleanup(); };
@@ -466,11 +595,13 @@ export class LighthouseService {
           '--disable-gpu',
           '--disable-dev-shm-usage',
           '--disable-software-rasterizer',
+          '--mute-audio',
           '--no-first-run',
           '--renderer-process-limit=1',
           '--disable-extensions',
           '--disable-background-networking',
           '--disable-component-update',
+          '--js-flags=--max-old-space-size=192',
         ],
       });
 
@@ -541,12 +672,16 @@ export class LighthouseService {
           const audits = lhr.audits ?? {};
           const displayedUrl = lhr.finalDisplayedUrl ? sanitizeDiagnosticUrl(lhr.finalDisplayedUrl) : finalUrl;
           finalUrl = displayedUrl ?? null;
-          navigationResponses.push(...extractLighthouseNavigationResponses(
-            audits,
-            runnerResult.artifacts?.DevtoolsLog,
-            targetUrl,
-            finalUrl,
-          ));
+          if (Array.isArray(runnerResult.navigationResponses)) {
+            navigationResponses.push(...runnerResult.navigationResponses);
+          } else {
+            navigationResponses.push(...extractLighthouseNavigationResponses(
+              audits,
+              runnerResult.artifacts?.DevtoolsLog,
+              targetUrl,
+              finalUrl,
+            ));
+          }
           if (navigationResponses.length) finalUrl = navigationResponses[navigationResponses.length - 1].url;
           outcome = classifyLighthouseResult(
             runtimeError,
@@ -691,6 +826,7 @@ export class LighthouseService {
     const stoppedPromise = new Promise<void>((resolve) => { resolveStopped = resolve; });
     let timer: NodeJS.Timeout | undefined;
     let wakePoller: (() => void) | undefined;
+    let lastHighAnonLogAt = 0;
     const pollIntervalMs = memoryMonitor?.pollIntervalMs ?? LIGHTHOUSE_MEMORY_ABORT_POLL_INTERVAL_MS;
     let consecutiveAboveThresholdSamples = 0;
     const poller = memoryMonitor ? (async () => {
@@ -721,6 +857,7 @@ export class LighthouseService {
             ? consecutiveAboveThresholdSamples + 1
             : 0;
           if (consecutiveAboveThresholdSamples >= LIGHTHOUSE_MEMORY_ABORT_CONSECUTIVE_SAMPLES) {
+            if (anonBytes !== null) await logHighAnonProcesses('memory_abort', anonBytes, attempt);
             try {
               memoryMonitor.onAbort?.(anonBytes!, memoryMonitor.thresholdBytes);
             } catch {
@@ -728,6 +865,13 @@ export class LighthouseService {
             }
             attemptController.abort('memory limit');
             return;
+          }
+          if (anonBytes !== null && anonBytes > LIGHTHOUSE_HIGH_ANON_LOG_BYTES) {
+            const now = Date.now();
+            if (now - lastHighAnonLogAt >= 1000) {
+              lastHighAnonLogAt = now;
+              await logHighAnonProcesses('audit_high_anon', anonBytes, attempt);
+            }
           }
         }
       }
