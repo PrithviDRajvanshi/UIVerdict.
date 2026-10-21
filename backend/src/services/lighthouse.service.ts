@@ -34,6 +34,8 @@ export type LighthouseDiagnosticsCallback = (diagnostics: LighthouseDiagnosticMe
 const LIGHTHOUSE_AUDIT_TIMEOUT_MS = 120_000;
 const CHROME_READY_RETRIES = 5;
 const CHROME_READY_RETRY_DELAY_MS = 100;
+const LIGHTHOUSE_MEMORY_ABORT_POLL_INTERVAL_MS = 500;
+const LIGHTHOUSE_MEMORY_ABORT_CONSECUTIVE_SAMPLES = 3;
 const LIGHTHOUSE_CATEGORIES = ['performance', 'accessibility', 'best-practices', 'seo'];
 export const LIGHTHOUSE_MEMORY_SAFE_CATEGORIES = ['accessibility', 'best-practices', 'seo'];
 
@@ -689,7 +691,8 @@ export class LighthouseService {
     const stoppedPromise = new Promise<void>((resolve) => { resolveStopped = resolve; });
     let timer: NodeJS.Timeout | undefined;
     let wakePoller: (() => void) | undefined;
-    const pollIntervalMs = memoryMonitor?.pollIntervalMs ?? 1000;
+    const pollIntervalMs = memoryMonitor?.pollIntervalMs ?? LIGHTHOUSE_MEMORY_ABORT_POLL_INTERVAL_MS;
+    let consecutiveAboveThresholdSamples = 0;
     const poller = memoryMonitor ? (async () => {
       while (!stopped && !attemptController.signal.aborted) {
         await new Promise<void>((resolve) => {
@@ -713,14 +716,19 @@ export class LighthouseService {
         } catch {
           // Cgroup data is best-effort; unreadable snapshots are skipped silently.
         }
-        if (!stopped && anonBytes !== null && anonBytes > memoryMonitor.thresholdBytes) {
-          try {
-            memoryMonitor.onAbort?.(anonBytes, memoryMonitor.thresholdBytes);
-          } catch {
-            // Logging hooks must not prevent the abort.
+        if (!stopped) {
+          consecutiveAboveThresholdSamples = anonBytes !== null && anonBytes > memoryMonitor.thresholdBytes
+            ? consecutiveAboveThresholdSamples + 1
+            : 0;
+          if (consecutiveAboveThresholdSamples >= LIGHTHOUSE_MEMORY_ABORT_CONSECUTIVE_SAMPLES) {
+            try {
+              memoryMonitor.onAbort?.(anonBytes!, memoryMonitor.thresholdBytes);
+            } catch {
+              // Logging hooks must not prevent the abort.
+            }
+            attemptController.abort('memory limit');
+            return;
           }
-          attemptController.abort('memory limit');
-          return;
         }
       }
     })() : Promise.resolve();

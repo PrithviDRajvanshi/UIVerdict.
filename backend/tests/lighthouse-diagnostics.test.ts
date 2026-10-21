@@ -303,6 +303,7 @@ async function testPerAttemptMemoryMonitorStopsBeforeRetry() {
   let launches = 0;
   let monitorStops = 0;
   let reads = 0;
+  let readsAtAbort = 0;
   let firstRunnerStarted = false;
   let rejectFirstAudit!: (error: Error) => void;
   let resolveFirstAuditStarted!: () => void;
@@ -339,16 +340,19 @@ async function testPerAttemptMemoryMonitorStopsBeforeRetry() {
   const result = service.runAudit('https://example.test/', undefined, undefined, undefined, undefined, {
     readAnonBytes: async () => {
       if (!firstRunnerStarted) return 0;
-      return reads++ === 0 ? 900 : 0;
+      const samples = [900, 900, 0, 900, 900, 900, 0];
+      return samples[reads++] ?? 0;
     },
     thresholdBytes: 850,
     pollIntervalMs: 1,
+    onAbort: () => { readsAtAbort = reads; },
     onStop: () => { monitorStops++; },
   });
   await firstAuditStarted;
   const metrics = await result;
   assert.strictEqual(launches, 2);
   assert.strictEqual(monitorStops, 2, 'each attempt stops its own memory monitor');
+  assert.strictEqual(readsAtAbort, 6, 'an intervening below-threshold sample resets the consecutive-sample count');
   assert.deepStrictEqual(categoryRequests, [
     ['performance', 'accessibility', 'best-practices', 'seo'],
     ['accessibility', 'best-practices', 'seo'],

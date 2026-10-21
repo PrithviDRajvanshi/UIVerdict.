@@ -324,7 +324,8 @@ export class GeminiService {
   }
 
   public async generateAnalysis(input: GeminiInputData): Promise<AiAnalysis> {
-    const models = [...new Set([config.geminiModel, config.geminiFallbackModel, config.geminiLastFallbackModel].filter(Boolean))];
+    const models = [...new Set([config.geminiModel, config.geminiFallbackModel, config.geminiLastFallbackModel].filter(Boolean))]
+      .sort((left, right) => Number(/flash-lite/i.test(right)) - Number(/flash-lite/i.test(left)));
     const deadline = Date.now() + config.geminiDeadlineMs;
     let lastError: any;
     for (const model of models) {

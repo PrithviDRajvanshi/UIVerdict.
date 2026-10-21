@@ -562,6 +562,9 @@ export class PlaywrightService {
         ...pageDiagnostics,
         ...(typeof pageDiagnostics.finalUrl === 'string' ? { finalUrl: sanitizeDiagnosticUrl(pageDiagnostics.finalUrl) } : {}),
         ...(typeof pageDiagnostics.title === 'string' ? { title: sanitizeDiagnosticMessage(pageDiagnostics.title) } : {}),
+        ...(typeof pageDiagnostics.bodyText === 'string'
+          ? { bodyText: sanitizeDiagnosticMessage(pageDiagnostics.bodyText, 300).slice(0, 300) }
+          : {}),
       } : { collectionError: 'page diagnostics unavailable' };
       console.log('[Playwright] Capture diagnostics:', {
         requestedUrl: sanitizeDiagnosticUrl(targetUrl),
