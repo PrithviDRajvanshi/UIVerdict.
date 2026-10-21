@@ -1,6 +1,5 @@
-import { playwrightService, ScreenshotResult } from './playwright.service';
-import { lighthouseService, LighthouseMetrics } from './lighthouse.service';
-import { geminiService } from './gemini.service';
+import type { ScreenshotResult } from './playwright.service';
+import type { LighthouseMetrics } from './lighthouse.service';
 import { AiAnalysis } from '../validators/aiAnalysis.validator';
 import { postgresRepository } from '../repositories/postgres/postgres.repository';
 import { AnalysisStatus } from '@prisma/client';
@@ -119,6 +118,8 @@ export class AnalysisService {
 
     try {
       if (mode === 'visual') {
+      const { playwrightService } = await import('./playwright.service');
+      const { geminiService } = await import('./gemini.service');
       try {
         // Playwright resolves only after its browser cleanup completes.
         if (signal?.aborted) throw new Error('Analysis request was cancelled');
@@ -154,6 +155,7 @@ export class AnalysisService {
       if (mode === 'visual') {
         metrics = unavailableLighthouseMetrics();
       } else {
+      const { LIGHTHOUSE_MEMORY_SAFE_CATEGORIES, lighthouseService } = await import('./lighthouse.service');
       if (signal?.aborted) throw new Error('Analysis request was cancelled');
 
       // Lighthouse owns its Chrome process. The monitor aborts through LighthouseService,
@@ -207,7 +209,8 @@ export class AnalysisService {
       })();
       try {
         metrics = await lighthouseService.runAudit(url, (diagnostics) =>
-          postgresRepository.updateLighthouseDiagnostics(analysis.id, diagnostics).then(() => undefined), auditController.signal, signal);
+          postgresRepository.updateLighthouseDiagnostics(analysis.id, diagnostics).then(() => undefined), auditController.signal, signal,
+          LIGHTHOUSE_MEMORY_SAFE_CATEGORIES);
         console.log(`[AnalysisService] Lighthouse audit completed for URL: ${sanitizeDiagnosticUrl(url)} (Performance: ${metrics.performance}, Accessibility: ${metrics.accessibility})`);
       } catch (lighthouseError: any) {
         if (isBrowserCleanupFailure(lighthouseError) || signal?.aborted) throw lighthouseError;
@@ -255,7 +258,7 @@ export class AnalysisService {
         ...(screenshotData ? { screenshotArtifactName: screenshotData.filename, screenshotSha256: screenshotData.sha256 } : {}),
       });
       const overallScore = null;
-      const partial = mode === 'tech' && (technicalUnavailable || [metrics.performance, metrics.accessibility, metrics.bestPractices, metrics.seo].some((score) => score === null));
+      const partial = mode === 'tech' && (technicalUnavailable || [metrics.accessibility, metrics.bestPractices, metrics.seo].some((score) => score === null));
       console.log(`[AnalysisService] PostgreSQL persistence complete. Analysis status marked as COMPLETED.`);
 
       // 6. Final response construction and return
